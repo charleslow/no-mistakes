@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/snorlax"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"gopkg.in/yaml.v3"
@@ -537,11 +538,14 @@ const defaultConfigYAML = `# no-mistakes global configuration
 
 # Agent to use for code generation. This may also be an ordered fallback list,
 # for example: agent: [codex, claude]
-# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target>
+# Options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, snorlax, acp:<target>
 # "auto" detects the first available native agent or ACP alias on your system
 # "cursor" is an ACP alias for acp:cursor using cursor-agent acp via acpx
 # "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
+# "snorlax" forwards each invocation to Snorlax's controlled container over a
+# local bridge socket (SNORLAX_NM_SOCKET); see plan-no-mistakes.md. Pilot is
+# codex-only; the model surface is configured via agent_args_override.snorlax.
 agent: auto
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
@@ -644,6 +648,8 @@ intent:
 `
 
 // defaultBinary maps agent names to their default binary names.
+// AgentSnorlax has no local binary — its "binary" is the bridge socket, whose
+// availability config resolution checks separately (see resolveConfiguredAgent).
 var defaultBinary = map[types.AgentName]string{
 	types.AgentClaude:   "claude",
 	types.AgentCodex:    "codex",
@@ -651,6 +657,7 @@ var defaultBinary = map[types.AgentName]string{
 	types.AgentOpenCode: "opencode",
 	types.AgentPi:       "pi",
 	types.AgentCopilot:  "copilot",
+	types.AgentSnorlax:  "snorlax",
 }
 
 // nativeAgentProbeOrder is the priority order for auto-detecting native agents.
@@ -846,7 +853,7 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 		return resolved, err == nil, "auto", err
 	}
 	if _, ok := defaultBinary[name]; !ok && !isACPAgent(name) {
-		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
+		return "", false, string(name), fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, snorlax, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}
 	if isACPAgent(name) {
 		available, bins, err := c.acpAvailable(name, lookPath)
@@ -855,6 +862,14 @@ func (c *Config) resolveConfiguredAgent(ctx context.Context, name types.AgentNam
 			return "", false, probe, err
 		}
 		return name, available, probe, nil
+	}
+	// AgentSnorlax has no local binary — its availability is the bridge socket.
+	if name == types.AgentSnorlax {
+		socket := snorlax.SocketPath()
+		if !snorlax.AvailableAt(socket) {
+			return "", false, socket, nil
+		}
+		return name, true, socket, nil
 	}
 	bin := c.AgentPathFor(name)
 	resolvedBin, err := lookPath(bin)
@@ -1007,6 +1022,14 @@ var agentArgsOverrideAgents = map[string]bool{
 	string(types.AgentOpenCode): true,
 	string(types.AgentPi):       true,
 	string(types.AgentCopilot):  true,
+	string(types.AgentSnorlax):  true,
+}
+
+func init() {
+	// The snorlax adapter forwards the exact upstream codex argv, so its
+	// reserved-flag surface is identical to codex (alias instead of duplicating
+	// the set so the two cannot drift).
+	reservedAgentArgs[string(types.AgentSnorlax)] = reservedAgentArgs[string(types.AgentCodex)]
 }
 
 // reservedAgentArgs lists flags that no-mistakes manages internally and that
@@ -1067,7 +1090,7 @@ var reservedAgentArgs = map[string]map[string]bool{
 func validateAgentArgsOverride(override map[string][]string) error {
 	for name, args := range override {
 		if !agentArgsOverrideAgents[name] {
-			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot)", name)
+			return fmt.Errorf("invalid agent name in agent_args_override: %q (valid: claude, codex, rovodev, opencode, pi, copilot, snorlax)", name)
 		}
 		reserved := reservedAgentArgs[name]
 		for i, arg := range args {

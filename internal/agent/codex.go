@@ -58,31 +58,12 @@ func (a *codexAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 }
 
 func (a *codexAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	schemaPath := ""
-	validationSchema := opts.JSONSchema
-	if len(opts.JSONSchema) > 0 {
-		f, err := os.CreateTemp("", "no-mistakes-codex-schema-*.json")
-		if err != nil {
-			return nil, fmt.Errorf("codex schema temp file: %w", err)
-		}
-		schemaPath = f.Name()
-		schema, err := codexOutputSchema(opts.JSONSchema)
-		if err != nil {
-			_ = f.Close()
-			_ = os.Remove(schemaPath)
-			return nil, fmt.Errorf("codex schema normalize: %w", err)
-		}
-		validationSchema = schema
-		if _, err := f.Write(schema); err != nil {
-			_ = f.Close()
-			_ = os.Remove(schemaPath)
-			return nil, fmt.Errorf("codex schema temp file write: %w", err)
-		}
-		if err := f.Close(); err != nil {
-			_ = os.Remove(schemaPath)
-			return nil, fmt.Errorf("codex schema temp file close: %w", err)
-		}
-		defer os.Remove(schemaPath)
+	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchema(opts.JSONSchema)
+	if err != nil {
+		return nil, err
+	}
+	if schemaCleanup != nil {
+		defer schemaCleanup()
 	}
 
 	resumeID := ""
@@ -388,6 +369,38 @@ func codexOutputSchema(schema json.RawMessage) ([]byte, error) {
 	}
 	addAdditionalPropertiesFalse(value)
 	return json.Marshal(value)
+}
+
+// prepareCodexSchema writes a structured-output schema to a temp file in the
+// normalized form codex's --output-schema expects, returning the temp file
+// path, the normalized schema (for result validation), and a cleanup func.
+// When rawSchema is empty it returns ("", nil, nil, nil). Shared by the local
+// codex adapter and the snorlax bridge adapter (which forwards the same codex
+// argv to a Snorlax-managed container).
+func prepareCodexSchema(rawSchema json.RawMessage) (path string, validationSchema json.RawMessage, cleanup func(), err error) {
+	if len(rawSchema) == 0 {
+		return "", nil, nil, nil
+	}
+	f, err := os.CreateTemp("", "no-mistakes-codex-schema-*.json")
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("codex schema temp file: %w", err)
+	}
+	schema, err := codexOutputSchema(rawSchema)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", nil, nil, fmt.Errorf("codex schema normalize: %w", err)
+	}
+	if _, err := f.Write(schema); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", nil, nil, fmt.Errorf("codex schema temp file write: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", nil, nil, fmt.Errorf("codex schema temp file close: %w", err)
+	}
+	return f.Name(), schema, func() { _ = os.Remove(f.Name()) }, nil
 }
 
 func addAdditionalPropertiesFalse(value any) {

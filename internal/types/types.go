@@ -142,6 +142,10 @@ const (
 	AgentPi       AgentName = "pi"
 	AgentCopilot  AgentName = "copilot"
 	AgentCursor   AgentName = "cursor"
+	// AgentSnorlax forwards each invocation to Snorlax's controlled container
+	// environment over a local Unix-socket bridge (plan-no-mistakes.md). The
+	// pilot is codex-only; rollback to direct codex is config-only.
+	AgentSnorlax AgentName = "snorlax"
 )
 
 // ACPAlias describes a first-class agent name that resolves to an ACP target.
