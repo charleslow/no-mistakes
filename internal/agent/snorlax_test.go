@@ -275,8 +275,9 @@ func TestSnorlaxAdapter_ModelSurfaceViaExtraArgs(t *testing.T) {
 
 func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
 	worktree := t.TempDir()
-	var schemaPath string
+	schemaPaths := make(chan string, 1)
 	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		var schemaPath string
 		for i := 0; i < len(req.Argv)-1; i++ {
 			if req.Argv[i] == "--output-schema" {
 				schemaPath = req.Argv[i+1]
@@ -295,6 +296,7 @@ func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
 			writeBridgeError(conn, "schema is not readable: "+err.Error())
 			return
 		}
+		schemaPaths <- schemaPath
 		writeStdout(conn, `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"{\"ok\":true}"}}`)
 		writeStdout(conn, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
 		writeExit(conn, 0, false)
@@ -309,8 +311,31 @@ func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
 	}
+	schemaPath := <-schemaPaths
 	if _, err := os.Stat(schemaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("schema %q remains after Run: %v", schemaPath, err)
+	}
+}
+
+func TestSnorlaxAdapter_ColdSessionPlaceholderIsNotForwarded(t *testing.T) {
+	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		if req.Session != nil {
+			writeBridgeError(conn, "empty session placeholder was forwarded")
+			return
+		}
+		writeStdout(conn, `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"ok"}}`)
+		writeStdout(conn, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+
+	a := &snorlaxAgent{codex: &codexAgent{}, socketPath: fb.socket}
+	if _, err := a.Run(context.Background(), RunOpts{
+		Prompt:  "p",
+		CWD:     t.TempDir(),
+		Session: &SessionRef{},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
 }
 

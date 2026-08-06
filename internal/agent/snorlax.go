@@ -159,7 +159,10 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 
 	resumeID := ""
 	var session *snorlaxSessionRef
-	if opts.Session != nil {
+	// RunSessions uses an empty SessionRef to represent a cold first turn. The
+	// bridge validates session identities, so omit that placeholder rather than
+	// serializing an invalid empty session object.
+	if opts.Session != nil && opts.Session.ID != "" {
 		resumeID = opts.Session.ID
 		session = &snorlaxSessionRef{ID: opts.Session.ID, Agent: opts.Session.Agent}
 	}
