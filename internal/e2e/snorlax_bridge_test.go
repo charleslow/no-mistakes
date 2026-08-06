@@ -20,7 +20,7 @@ import (
 
 // fakeSnorlaxBridge speaks the production framed Unix-socket protocol and
 // launches the recorded-fixture Codex fake. It deliberately permits only
-// worktree-visible schemas: a real Snorlax container mounts NM_HOME, not the
+// NM_HOME-visible schemas: a real Snorlax container mounts NM_HOME, not the
 // host temporary directory.
 type fakeSnorlaxBridge struct {
 	t        *testing.T

@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/snorlax"
 )
 
@@ -146,10 +148,15 @@ func (a *snorlaxAgent) bridgeSocket() string {
 }
 
 func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	// Snorlax mounts NM_HOME (and its pipeline worktrees) into its container at
-	// the same absolute path, but not the host temporary directory. Keep the
-	// schema beside the worktree so codex can open the exact argv path remotely.
-	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchemaInDir(opts.JSONSchema, opts.CWD)
+	schemaDir := ""
+	if len(opts.JSONSchema) > 0 {
+		var err error
+		schemaDir, err = snorlaxSchemaDir()
+		if err != nil {
+			return nil, err
+		}
+	}
+	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchemaInDir(opts.JSONSchema, schemaDir)
 	if err != nil {
 		return nil, err
 	}
@@ -341,6 +348,18 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	}
 	emitAgentExited(opts, "snorlax", 0, retErr)
 	return res, retErr
+}
+
+func snorlaxSchemaDir() (string, error) {
+	p, err := paths.New()
+	if err != nil {
+		return "", fmt.Errorf("snorlax schema dir: %w", err)
+	}
+	dir := filepath.Join(p.Root(), "tmp", "codex-schemas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("snorlax schema dir: %w", err)
+	}
+	return dir, nil
 }
 
 // snorlaxResultWait bounds how long the adapter waits for the terminal frame

@@ -273,8 +273,10 @@ func TestSnorlaxAdapter_ModelSurfaceViaExtraArgs(t *testing.T) {
 	}
 }
 
-func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
+func TestSnorlaxAdapter_SchemaIsVisibleFromMountedNMHomeScratch(t *testing.T) {
+	nmHome := t.TempDir()
 	worktree := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
 	schemaPaths := make(chan string, 1)
 	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
 		var schemaPath string
@@ -288,8 +290,12 @@ func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
 			writeBridgeError(conn, "missing output schema")
 			return
 		}
-		if filepath.Dir(schemaPath) != worktree {
-			writeBridgeError(conn, "schema is outside mounted worktree")
+		if !isPathWithin(schemaPath, nmHome) {
+			writeBridgeError(conn, "schema is outside mounted NM_HOME")
+			return
+		}
+		if isPathWithin(schemaPath, worktree) {
+			writeBridgeError(conn, "schema is inside source worktree")
 			return
 		}
 		if _, err := os.ReadFile(schemaPath); err != nil {
@@ -314,6 +320,13 @@ func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
 	schemaPath := <-schemaPaths
 	if _, err := os.Stat(schemaPath); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("schema %q remains after Run: %v", schemaPath, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(worktree, ".no-mistakes-codex-schema-*.json"))
+	if err != nil {
+		t.Fatalf("glob schema artifacts: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("schema artifacts in source worktree: %v", matches)
 	}
 }
 
@@ -346,4 +359,9 @@ func contains(slice []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func isPathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
