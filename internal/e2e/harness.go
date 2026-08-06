@@ -42,15 +42,18 @@ type Harness struct {
 	AgentLog    string // every fake-agent invocation appended here, one JSON per line
 	Scenario    string // optional path to a scenario yaml; empty = built-in default
 
-	agentName         string // claude / codex / opencode
+	agentName         string // claude / codex / opencode / snorlax
 	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
 	daemonOwn         *e2edaemon.Ownership
+	snorlaxBridge     *fakeSnorlaxBridge
 }
 
 // SetupOpts controls per-test setup.
 type SetupOpts struct {
-	// Agent picks which fake the harness wires up: "claude", "codex", or
-	// "opencode". The other two binaries are still on PATH (so `auto`
+	// Agent picks which fake the harness wires up: "claude", "codex",
+	// "opencode", or "snorlax". Snorlax speaks the production Unix-socket
+	// bridge protocol and runs the Codex fake behind that bridge. The other
+	// native binaries are still on PATH (so `auto`
 	// detection finds the requested one first via config), but only the
 	// chosen one is exercised.
 	Agent string
@@ -157,6 +160,13 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 	// update-check.json while testing.T is removing the temp directory.
 	t.Setenv("NO_MISTAKES_NO_UPDATE_CHECK", "1")
 
+	if h.agentName == "snorlax" {
+		socket := filepath.Join(root, "snorlax-nm.sock")
+		h.snorlaxBridge = startFakeSnorlaxBridge(t, socket, filepath.Join(h.BinDir, "codex"), h.NMHome)
+		t.Setenv("SNORLAX_NM_SOCKET", socket)
+		t.Cleanup(h.snorlaxBridge.Close)
+	}
+
 	h.writeGlobalConfig()
 	h.initGitRepos()
 
@@ -212,6 +222,13 @@ auto_fix:
 	if err := os.WriteFile(configPath, []byte(cfg), 0o644); err != nil {
 		h.t.Fatalf("write config: %v", err)
 	}
+}
+
+func (h *Harness) fakeAgentName() string {
+	if h.agentName == "snorlax" {
+		return "codex"
+	}
+	return h.agentName
 }
 
 // initGitRepos creates a bare upstream repo and a working clone with one

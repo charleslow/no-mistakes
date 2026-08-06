@@ -62,15 +62,15 @@ func (a *snorlaxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 // --- bridge wire protocol (mirrors src/nm/protocol.ts) ----------------------
 
 const (
-	snorlaxFrameRequest = 0x01
-	snorlaxFrameStdin   = 0x02
+	snorlaxFrameRequest  = 0x01
+	snorlaxFrameStdin    = 0x02
 	snorlaxFrameStdinEOF = 0x03
-	snorlaxFrameCancel  = 0x04
-	snorlaxFrameStarted = 0x10
-	snorlaxFrameStdout  = 0x11
-	snorlaxFrameStderr  = 0x12
-	snorlaxFrameExit    = 0x13
-	snorlaxFrameError   = 0x14
+	snorlaxFrameCancel   = 0x04
+	snorlaxFrameStarted  = 0x10
+	snorlaxFrameStdout   = 0x11
+	snorlaxFrameStderr   = 0x12
+	snorlaxFrameExit     = 0x13
+	snorlaxFrameError    = 0x14
 
 	snorlaxMaxFramePayload = 4 * 1024 * 1024
 )
@@ -146,7 +146,10 @@ func (a *snorlaxAgent) bridgeSocket() string {
 }
 
 func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchema(opts.JSONSchema)
+	// Snorlax mounts NM_HOME (and its pipeline worktrees) into its container at
+	// the same absolute path, but not the host temporary directory. Keep the
+	// schema beside the worktree so codex can open the exact argv path remotely.
+	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchemaInDir(opts.JSONSchema, opts.CWD)
 	if err != nil {
 		return nil, err
 	}

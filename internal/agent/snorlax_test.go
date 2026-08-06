@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,12 +17,12 @@ import (
 // (the server half), so the adapter can be exercised end-to-end without Docker
 // or the Snorlax host. Each connection runs `handle`.
 type fakeBridge struct {
-	t       *testing.T
-	socket  string
-	ln      net.Listener
-	handle  func(conn net.Conn, request *snorlaxBridgeRequest)
-	lastReq *snorlaxBridgeRequest
-	mu      sync.Mutex
+	t         *testing.T
+	socket    string
+	ln        net.Listener
+	handle    func(conn net.Conn, request *snorlaxBridgeRequest)
+	lastReq   *snorlaxBridgeRequest
+	mu        sync.Mutex
 	gotCancel bool
 }
 
@@ -269,6 +270,47 @@ func TestSnorlaxAdapter_ModelSurfaceViaExtraArgs(t *testing.T) {
 	argv := fb.request().Argv
 	if !contains(argv, "-m") || !contains(argv, "gpt-5.5") {
 		t.Errorf("argv = %v, want -m gpt-5.5 injected from extraArgs", argv)
+	}
+}
+
+func TestSnorlaxAdapter_SchemaIsVisibleFromMountedWorktree(t *testing.T) {
+	worktree := t.TempDir()
+	var schemaPath string
+	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		for i := 0; i < len(req.Argv)-1; i++ {
+			if req.Argv[i] == "--output-schema" {
+				schemaPath = req.Argv[i+1]
+				break
+			}
+		}
+		if schemaPath == "" {
+			writeBridgeError(conn, "missing output schema")
+			return
+		}
+		if filepath.Dir(schemaPath) != worktree {
+			writeBridgeError(conn, "schema is outside mounted worktree")
+			return
+		}
+		if _, err := os.ReadFile(schemaPath); err != nil {
+			writeBridgeError(conn, "schema is not readable: "+err.Error())
+			return
+		}
+		writeStdout(conn, `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"{\"ok\":true}"}}`)
+		writeStdout(conn, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+
+	a := &snorlaxAgent{codex: &codexAgent{}, socketPath: fb.socket}
+	if _, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "p",
+		CWD:        worktree,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if _, err := os.Stat(schemaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("schema %q remains after Run: %v", schemaPath, err)
 	}
 }
 

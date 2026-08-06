@@ -45,11 +45,15 @@ import (
 func TestUserJourney(t *testing.T) {
 	// Subtests run sequentially: each one calls t.Setenv to point env
 	// vars at its own temp dirs, and t.Setenv is incompatible with
-	// t.Parallel. Three serial runs cost ~30s total on a warm cache.
-	for _, agentName := range []string{"claude", "codex", "opencode"} {
+	// t.Parallel. The Snorlax case puts the regular Codex fixture behind the
+	// real bridge protocol, so it exercises the full socket/container boundary.
+	for _, agentName := range []string{"claude", "codex", "opencode", "snorlax"} {
 		agentName := agentName
 		t.Run(agentName, func(t *testing.T) {
-			runHappyPath(t, agentName)
+			h := runHappyPath(t, agentName)
+			if agentName == "snorlax" {
+				assertSnorlaxBridgeJourney(t, h)
+			}
 		})
 	}
 }
@@ -143,7 +147,7 @@ func TestAgentlessRunFailsBeforePipelineStarts(t *testing.T) {
 	}
 }
 
-func runHappyPath(t *testing.T, agentName string) {
+func runHappyPath(t *testing.T, agentName string) *Harness {
 	h := NewHarness(t, SetupOpts{Agent: agentName, Scenario: cleanReviewScenario(t)})
 
 	assertRootVersion(t, h)
@@ -260,8 +264,8 @@ func runHappyPath(t *testing.T, agentName string) {
 		t.Fatalf("expected fake agent to be invoked, got 0 invocations")
 	}
 	for _, inv := range invs {
-		if inv.Agent != agentName {
-			t.Errorf("expected invocations under %q, got %q (%v)", agentName, inv.Agent, inv.Args)
+		if inv.Agent != h.fakeAgentName() {
+			t.Errorf("expected invocations under %q, got %q (%v)", h.fakeAgentName(), inv.Agent, inv.Args)
 		}
 	}
 
@@ -351,6 +355,7 @@ func runHappyPath(t *testing.T, agentName string) {
 	assertEjectOutput(t, h, out)
 	assertOutputDoesNotContainPath(t, out, initWorktree, "eject from worktree")
 	assertGateRemoteAbsent(t, h)
+	return h
 }
 
 func cleanReviewScenario(t *testing.T) string {

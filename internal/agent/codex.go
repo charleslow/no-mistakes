@@ -378,10 +378,20 @@ func codexOutputSchema(schema json.RawMessage) ([]byte, error) {
 // codex adapter and the snorlax bridge adapter (which forwards the same codex
 // argv to a Snorlax-managed container).
 func prepareCodexSchema(rawSchema json.RawMessage) (path string, validationSchema json.RawMessage, cleanup func(), err error) {
+	return prepareCodexSchemaAt(rawSchema, "")
+}
+
+// prepareCodexSchemaInDir writes a schema into dir so an adapter whose agent
+// runs in a mounted environment can pass the path through unchanged.
+func prepareCodexSchemaInDir(rawSchema json.RawMessage, dir string) (path string, validationSchema json.RawMessage, cleanup func(), err error) {
+	return prepareCodexSchemaAt(rawSchema, dir)
+}
+
+func prepareCodexSchemaAt(rawSchema json.RawMessage, dir string) (path string, validationSchema json.RawMessage, cleanup func(), err error) {
 	if len(rawSchema) == 0 {
 		return "", nil, nil, nil
 	}
-	f, err := os.CreateTemp("", "no-mistakes-codex-schema-*.json")
+	f, err := os.CreateTemp(dir, ".no-mistakes-codex-schema-*.json")
 	if err != nil {
 		return "", nil, nil, fmt.Errorf("codex schema temp file: %w", err)
 	}
