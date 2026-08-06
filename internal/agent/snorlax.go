@@ -9,9 +9,11 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/snorlax"
 )
 
@@ -62,15 +64,15 @@ func (a *snorlaxAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 // --- bridge wire protocol (mirrors src/nm/protocol.ts) ----------------------
 
 const (
-	snorlaxFrameRequest = 0x01
-	snorlaxFrameStdin   = 0x02
+	snorlaxFrameRequest  = 0x01
+	snorlaxFrameStdin    = 0x02
 	snorlaxFrameStdinEOF = 0x03
-	snorlaxFrameCancel  = 0x04
-	snorlaxFrameStarted = 0x10
-	snorlaxFrameStdout  = 0x11
-	snorlaxFrameStderr  = 0x12
-	snorlaxFrameExit    = 0x13
-	snorlaxFrameError   = 0x14
+	snorlaxFrameCancel   = 0x04
+	snorlaxFrameStarted  = 0x10
+	snorlaxFrameStdout   = 0x11
+	snorlaxFrameStderr   = 0x12
+	snorlaxFrameExit     = 0x13
+	snorlaxFrameError    = 0x14
 
 	snorlaxMaxFramePayload = 4 * 1024 * 1024
 )
@@ -146,7 +148,15 @@ func (a *snorlaxAgent) bridgeSocket() string {
 }
 
 func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
-	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchema(opts.JSONSchema)
+	schemaDir := ""
+	if len(opts.JSONSchema) > 0 {
+		var err error
+		schemaDir, err = snorlaxSchemaDir()
+		if err != nil {
+			return nil, err
+		}
+	}
+	schemaPath, validationSchema, schemaCleanup, err := prepareCodexSchemaInDir(opts.JSONSchema, schemaDir)
 	if err != nil {
 		return nil, err
 	}
@@ -156,7 +166,10 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 
 	resumeID := ""
 	var session *snorlaxSessionRef
-	if opts.Session != nil {
+	// RunSessions uses an empty SessionRef to represent a cold first turn. The
+	// bridge validates session identities, so omit that placeholder rather than
+	// serializing an invalid empty session object.
+	if opts.Session != nil && opts.Session.ID != "" {
 		resumeID = opts.Session.ID
 		session = &snorlaxSessionRef{ID: opts.Session.ID, Agent: opts.Session.Agent}
 	}
@@ -335,6 +348,18 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	}
 	emitAgentExited(opts, "snorlax", 0, retErr)
 	return res, retErr
+}
+
+func snorlaxSchemaDir() (string, error) {
+	p, err := paths.New()
+	if err != nil {
+		return "", fmt.Errorf("snorlax schema dir: %w", err)
+	}
+	dir := filepath.Join(p.Root(), "tmp", "codex-schemas")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("snorlax schema dir: %w", err)
+	}
+	return dir, nil
 }
 
 // snorlaxResultWait bounds how long the adapter waits for the terminal frame

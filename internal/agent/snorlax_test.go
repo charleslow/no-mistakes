@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -16,12 +17,12 @@ import (
 // (the server half), so the adapter can be exercised end-to-end without Docker
 // or the Snorlax host. Each connection runs `handle`.
 type fakeBridge struct {
-	t       *testing.T
-	socket  string
-	ln      net.Listener
-	handle  func(conn net.Conn, request *snorlaxBridgeRequest)
-	lastReq *snorlaxBridgeRequest
-	mu      sync.Mutex
+	t         *testing.T
+	socket    string
+	ln        net.Listener
+	handle    func(conn net.Conn, request *snorlaxBridgeRequest)
+	lastReq   *snorlaxBridgeRequest
+	mu        sync.Mutex
 	gotCancel bool
 }
 
@@ -272,6 +273,85 @@ func TestSnorlaxAdapter_ModelSurfaceViaExtraArgs(t *testing.T) {
 	}
 }
 
+func TestSnorlaxAdapter_SchemaIsVisibleFromMountedNMHomeScratch(t *testing.T) {
+	nmHome := t.TempDir()
+	worktree := t.TempDir()
+	t.Setenv("NM_HOME", nmHome)
+	schemaPaths := make(chan string, 1)
+	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		var schemaPath string
+		for i := 0; i < len(req.Argv)-1; i++ {
+			if req.Argv[i] == "--output-schema" {
+				schemaPath = req.Argv[i+1]
+				break
+			}
+		}
+		if schemaPath == "" {
+			writeBridgeError(conn, "missing output schema")
+			return
+		}
+		if !isPathWithin(schemaPath, nmHome) {
+			writeBridgeError(conn, "schema is outside mounted NM_HOME")
+			return
+		}
+		if isPathWithin(schemaPath, worktree) {
+			writeBridgeError(conn, "schema is inside source worktree")
+			return
+		}
+		if _, err := os.ReadFile(schemaPath); err != nil {
+			writeBridgeError(conn, "schema is not readable: "+err.Error())
+			return
+		}
+		schemaPaths <- schemaPath
+		writeStdout(conn, `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"{\"ok\":true}"}}`)
+		writeStdout(conn, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+
+	a := &snorlaxAgent{codex: &codexAgent{}, socketPath: fb.socket}
+	if _, err := a.Run(context.Background(), RunOpts{
+		Prompt:     "p",
+		CWD:        worktree,
+		JSONSchema: json.RawMessage(`{"type":"object","properties":{"ok":{"type":"boolean"}}}`),
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	schemaPath := <-schemaPaths
+	if _, err := os.Stat(schemaPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("schema %q remains after Run: %v", schemaPath, err)
+	}
+	matches, err := filepath.Glob(filepath.Join(worktree, ".no-mistakes-codex-schema-*.json"))
+	if err != nil {
+		t.Fatalf("glob schema artifacts: %v", err)
+	}
+	if len(matches) != 0 {
+		t.Errorf("schema artifacts in source worktree: %v", matches)
+	}
+}
+
+func TestSnorlaxAdapter_ColdSessionPlaceholderIsNotForwarded(t *testing.T) {
+	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		if req.Session != nil {
+			writeBridgeError(conn, "empty session placeholder was forwarded")
+			return
+		}
+		writeStdout(conn, `{"type":"item.completed","item":{"id":"i1","type":"agent_message","text":"ok"}}`)
+		writeStdout(conn, `{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+
+	a := &snorlaxAgent{codex: &codexAgent{}, socketPath: fb.socket}
+	if _, err := a.Run(context.Background(), RunOpts{
+		Prompt:  "p",
+		CWD:     t.TempDir(),
+		Session: &SessionRef{},
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func contains(slice []string, want string) bool {
 	for _, s := range slice {
 		if s == want {
@@ -279,4 +359,9 @@ func contains(slice []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func isPathWithin(path, root string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
