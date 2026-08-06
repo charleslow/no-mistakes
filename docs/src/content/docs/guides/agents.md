@@ -47,6 +47,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
+| Snorlax | `snorlax` | Local bridge socket, Codex JSONL events |
 | Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
@@ -194,7 +195,7 @@ If native agent discovery does not resolve the binary you expect, check `~/.no-m
 Five global config fields tune resolution and invocation, and the [Global Config Reference](/no-mistakes/reference/global-config/) owns each one:
 
 - [`agent_path_override`](/no-mistakes/reference/global-config/#agent_path_override) - custom binary paths per native agent, plus the default native binary-name table.
-- [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) - extra CLI flags per native agent for model selection, service tier, reasoning depth, or permission mode, including the reserved-flag rules and smart defaults. Keep it global-only; it reflects your local agent setup rather than repo policy.
+- [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) - extra CLI flags per supported agent with a CLI-style argument surface, including the reserved-flag rules and smart defaults. Keep it global-only; it reflects your local agent setup rather than repo policy.
 - [`acpx_path`](/no-mistakes/reference/global-config/#acpx_path) - the bridge binary path for explicit ACP targets and first-class ACP aliases.
 - [`acp_registry_overrides`](/no-mistakes/reference/global-config/#acp_registry_overrides) - raw ACP target commands, including replacements for alias defaults such as `cursor-agent acp`, plus their availability-probing rules.
 - [`agent`](/no-mistakes/reference/global-config/#agent) - the `auto` resolution order and ordered fallback-list semantics.
@@ -264,6 +265,10 @@ Spawns a `codex` subprocess for each invocation with `exec --json`. When structu
 Codex model and config overrides, such as `-m gpt-5.4`, `-c service_tier="priority"`, or `-c model_reasoning_effort="low"`, belong in global `agent_args_override.codex`.
 For review-fixer reuse, Codex resumes the reported thread with `codex exec resume <id> <prompt>`.
 That resume command has a narrower flag surface than `codex exec`, so a resume that rejects an override falls back to a fresh fixer session rather than skipping the fix turn.
+
+## Snorlax
+
+Forwards Codex invocations to Snorlax's controlled container over the local bridge socket (`SNORLAX_NM_SOCKET`, or Snorlax's default socket path). Snorlax uses the Codex `exec --json` protocol and accepts model/config overrides from `agent_args_override.snorlax`. When structured output is requested, no-mistakes writes the normalized schema under `$NM_HOME/tmp/codex-schemas/` before passing `--output-schema`, so the bridge-mounted container can open it.
 
 ## Rovo Dev
 

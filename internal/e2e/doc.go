@@ -3,11 +3,13 @@
 // the `e2e` build tag so they are excluded from `go test ./...` and only
 // run via `make e2e` (or `go test -tags=e2e ./internal/e2e/...`).
 //
-// The fake agent (cmd/fakeagent) is symlinked under each agent's binary
-// name (claude, codex, opencode) into a temp PATH directory, and replies
+// The fake agent (cmd/fakeagent) is symlinked under each native e2e agent's
+// binary name (claude, codex, opencode) into a temp PATH directory, and replies
 // with deterministic canned responses defined by Scenario YAML or by the
-// built-in "everything is clean" default. Every invocation is appended to
-// $FAKEAGENT_LOG so tests can assert on which prompts the pipeline made.
+// built-in "everything is clean" default. The Snorlax case drives the same
+// Codex fake through the production bridge protocol. Every invocation is
+// appended to $FAKEAGENT_LOG so tests can assert on which prompts the pipeline
+// made.
 //
 // Why e2e at all: see the audit in the PR description. Unit tests for
 // pipeline orchestration, executor branching, and CLI wiring give weak

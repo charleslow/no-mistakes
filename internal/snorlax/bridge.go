@@ -2,7 +2,6 @@
 // used by both config resolution (is the bridge up?) and the agent adapter
 // (where do I dial?). It depends only on the standard library so it can sit
 // below both internal/config and internal/agent without inverting layering.
-// E2E: this comment exercises the snorlax bridge pipeline end-to-end.
 package snorlax
 
 import (

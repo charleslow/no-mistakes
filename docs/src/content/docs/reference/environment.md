@@ -34,6 +34,17 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead.
 
+## `SNORLAX_NM_SOCKET`
+
+Override the local Snorlax bridge socket used by `agent: snorlax`.
+
+|         |                                                                                                 |
+| ------- | ----------------------------------------------------------------------------------------------- |
+| Type    | `string`                                                                                        |
+| Default | `$XDG_RUNTIME_DIR/snorlax-nm.sock`, falling back to `~/.snorlax/nm-bridge.sock` when home exists |
+
+When set, no-mistakes uses this socket for Snorlax availability checks and for forwarding Codex invocations to the bridge.
+
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
 Bitbucket Cloud account email used for PR creation and CI monitoring.
