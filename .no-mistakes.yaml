@@ -7,6 +7,14 @@
 # (commands.test) and docs/src/content/docs/reference/pipeline-steps.md (Test).
 # Lint and format stay explicit so those gates stay deterministic.
 
+# The CI workflow (.github/workflows/ci.yml) only runs on pull requests to
+# `main`, but this fork's default/gating branch is `snorlax-agent-bridge`, so
+# PRs here never trigger CI and the gate would otherwise block forever waiting
+# for checks that cannot register. Declare no_ci so a zero-check run is treated
+# as ready. Broad race-enabled Go coverage still runs in upstream `main` CI
+# (`go test -race ./...`) and stays mandatory before merging to `main`.
+no_ci: true
+
 commands:
   lint: "make lint"
   format: "gofmt -w ."
