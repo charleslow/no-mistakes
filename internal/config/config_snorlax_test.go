@@ -59,17 +59,69 @@ func TestResolveAgent_SnorlaxBridgeMissing(t *testing.T) {
 	}
 }
 
-// agent_args_override.snorlax is accepted (and reuses codex's reserved-flag set).
+// agent_args_override.snorlax is accepted. Its reserved-flag set is the union
+// of codex and pi (see config.go init), so managed flags of EITHER backend are
+// protected.
 func TestAgentArgsOverride_SnorlaxAccepted(t *testing.T) {
 	if err := validateAgentArgsOverride(map[string][]string{
 		"snorlax": {"-m", "gpt-5.5"},
 	}); err != nil {
 		t.Fatalf("expected snorlax override accepted, got: %v", err)
 	}
-	// A codex-reserved flag must also be reserved for snorlax (same argv shape).
+	// A codex-reserved flag is reserved for snorlax too.
 	if err := validateAgentArgsOverride(map[string][]string{
 		"snorlax": {"--json"},
 	}); err == nil || !strings.Contains(err.Error(), "cannot be overridden") {
 		t.Errorf("expected --json reserved for snorlax, got: %v", err)
+	}
+}
+
+// snorlax_backend selects the bridge's in-container CLI and is carried from
+// global config through Merge into the resolved Config.
+func TestLoadGlobal_SnorlaxBackend(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("agent: snorlax\nsnorlax_backend: pi\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadGlobal(path)
+	if err != nil {
+		t.Fatalf("LoadGlobal: %v", err)
+	}
+	if cfg.SnorlaxBackend != "pi" {
+		t.Errorf("SnorlaxBackend = %q, want pi", cfg.SnorlaxBackend)
+	}
+	merged := Merge(cfg, &RepoConfig{})
+	if merged.SnorlaxBackend != "pi" {
+		t.Errorf("merged SnorlaxBackend = %q, want pi", merged.SnorlaxBackend)
+	}
+}
+
+func TestLoadGlobal_SnorlaxBackendInvalid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte("snorlax_backend: gemini\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadGlobal(path)
+	if err == nil || !strings.Contains(err.Error(), `must be "codex" or "pi"`) {
+		t.Errorf("err = %v, want snorlax_backend validation error", err)
+	}
+}
+
+// pi's managed flags (--mode, --no-session) are reserved for snorlax too, so a
+// pi-backend operator can't clobber no-mistakes' JSONL parsing flags.
+func TestAgentArgsOverride_SnorlaxPiFlagsReserved(t *testing.T) {
+	for _, reserved := range []string{"--mode", "--no-session"} {
+		if err := validateAgentArgsOverride(map[string][]string{
+			"snorlax": {reserved},
+		}); err == nil || !strings.Contains(err.Error(), "cannot be overridden") {
+			t.Errorf("expected %q reserved for snorlax, got: %v", reserved, err)
+		}
+	}
+	if err := validateAgentArgsOverride(map[string][]string{
+		"snorlax": {"--print", "--model", "inferx/deepseek-v4-flash-0731"},
+	}); err != nil {
+		t.Errorf("expected snorlax pi override accepted, got: %v", err)
 	}
 }

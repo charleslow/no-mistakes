@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -31,25 +32,45 @@ import (
 // The adapter knows neither Docker nor credentials: it speaks only the framed
 // socket protocol (src/nm/protocol.ts) and codex's JSONL. Rollback to direct
 // `agent: codex` is config-only (switch the agent name back).
+type snorlaxBackendKind string
+
+const (
+	snorlaxBackendCodex snorlaxBackendKind = "codex"
+	snorlaxBackendPi    snorlaxBackendKind = "pi"
+)
+
 type snorlaxAgent struct {
-	// codex supplies buildArgs, schema handling, and the JSONL parser so the
-	// snorlax adapter's invocation shape is byte-for-byte upstream codex.
+	backend snorlaxBackendKind
+	// codex is used when backend == codex: it supplies buildArgs, schema
+	// handling, and the JSONL parser so the adapter's invocation shape is
+	// byte-for-byte upstream codex.
 	codex *codexAgent
+	// pi is used when backend == pi: it supplies buildArgs and the JSONL parser
+	// so the adapter drives the pi-agent-cli backend (which can reach
+	// openai-compatible providers like inferx that codex can't). pi is NOT
+	// exec'd locally — only argv + parser are reused; execution stays in the
+	// bridge container, exactly like the codex path.
+	pi *piAgent
 	// socketPath is resolved at Run time (env/default); injectable for tests.
 	socketPath string
 }
 
 func (a *snorlaxAgent) Name() string { return "snorlax" }
 
-// SupportsSessionResume mirrors codex: the bridge forwards `codex exec resume
-// <id>` unchanged and the JSONL thread.started event carries the identity back.
-func (a *snorlaxAgent) SupportsSessionResume() bool { return true }
+// SupportsSessionResume is true for codex (the bridge forwards `codex exec
+// resume <id>`) and false for pi (pi runs --no-session, so every turn is cold).
+func (a *snorlaxAgent) SupportsSessionResume() bool {
+	return a.backend != snorlaxBackendPi
+}
 
 func (a *snorlaxAgent) ReportsAgentAttempts() bool { return true }
 
-// NeutralizesGateInstructions delegates to the embedded codex adapter: the
-// argv it forwards carries the same project-settings suppression flags.
+// NeutralizesGateInstructions delegates to the active backend: codex's or pi's
+// project-settings suppression flag (built into each backend's argv).
 func (a *snorlaxAgent) NeutralizesGateInstructions() bool {
+	if a.backend == snorlaxBackendPi && a.pi != nil {
+		return a.pi.NeutralizesGateInstructions()
+	}
 	return a.codex.NeutralizesGateInstructions()
 }
 
@@ -83,6 +104,10 @@ type snorlaxBridgeRequest struct {
 	Cwd         string             `json:"cwd"`
 	ExecutionID string             `json:"executionId"`
 	Session     *snorlaxSessionRef `json:"session,omitempty"`
+	// StdinB64 carries pi's prompt (pi reads its prompt from stdin; codex takes
+	// it as an argv arg and leaves this empty). The bridge writes it to the
+	// container's stdin once at spawn, then closes.
+	StdinB64 string `json:"stdinB64,omitempty"`
 }
 
 type snorlaxSessionRef struct {
@@ -148,6 +173,13 @@ func (a *snorlaxAgent) bridgeSocket() string {
 }
 
 func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
+	if a.backend == snorlaxBackendPi {
+		return a.runOncePi(ctx, opts)
+	}
+	return a.runOnceCodex(ctx, opts)
+}
+
+func (a *snorlaxAgent) runOnceCodex(ctx context.Context, opts RunOpts) (*Result, error) {
 	schemaDir := ""
 	if len(opts.JSONSchema) > 0 {
 		var err error
@@ -177,6 +209,140 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	// surface matches `agent: codex` exactly (plan-no-mistakes.md §Contract).
 	argv := a.codex.buildArgs(opts.Prompt, schemaPath, resumeID)
 
+	req := snorlaxBridgeRequest{
+		Agent:       "codex",
+		Argv:        argv,
+		Cwd:         opts.CWD,
+		ExecutionID: fmt.Sprintf("nm-%d-%d", time.Now().UnixNano(), os.Getpid()),
+		Session:     session,
+	}
+
+	var usage TokenUsage
+	var lastMessage string
+	var codexErr string
+	var threadID string
+	metrics := newCodexMetricsAccumulator()
+	parse := func(ctx context.Context, r io.Reader) error {
+		return parseCodexEvents(ctx, r, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics)
+	}
+	finalize := func() (*Result, error) {
+		res, ferr := finalizeTextResult("snorlax", lastMessage, validationSchema, usage)
+		if res != nil {
+			res.SessionID = threadID
+			res.Resumed = resumeID != ""
+			res.SessionUsageCumulative = true
+			m := metrics.metrics()
+			res.Metrics = &m
+			// resolveCodexModel reads a local rollout transcript that does not
+			// exist on the no-mistakes host (codex ran inside the container);
+			// leave model identity unknown rather than fabricate it.
+		}
+		return res, ferr
+	}
+	return a.runBridgeTurn(ctx, opts, req, parse, finalize, func() string { return codexErr })
+}
+
+func (a *snorlaxAgent) runOncePi(ctx context.Context, opts RunOpts) (*Result, error) {
+	// pi reads its prompt from stdin and has no --output-schema equivalent, so
+	// the JSON contract (if any) is inlined into the prompt (buildPiPrompt).
+	// pi runs --no-session, so there is no resume: every turn is cold.
+	prompt := buildPiPrompt(opts.Prompt, opts.JSONSchema)
+	req := snorlaxBridgeRequest{
+		Agent:       "pi",
+		Argv:        a.pi.buildArgs(),
+		Cwd:         opts.CWD,
+		ExecutionID: fmt.Sprintf("nm-%d-%d", time.Now().UnixNano(), os.Getpid()),
+		StdinB64:    base64.StdEncoding.EncodeToString([]byte(prompt)),
+	}
+
+	pp := &piParser{onChunk: opts.OnChunk}
+	parse := func(ctx context.Context, r io.Reader) error {
+		return pp.parse(ctx, r)
+	}
+	finalize := func() (*Result, error) {
+		// pi exits 0 even on an in-run API/auth error (the outcome is read from
+		// the event stream's last assistant message), so surface a reported
+		// assistant error here exactly like the native pi adapter.
+		if pp.assistantError != "" {
+			return nil, fmt.Errorf("pi reported error: %s", pp.assistantError)
+		}
+		return finalizeTextResult("snorlax", pp.finalText(), opts.JSONSchema, pp.usage)
+	}
+	return a.runBridgeTurn(ctx, opts, req, parse, finalize, func() string { return "" })
+}
+
+// snorlaxFrameOutcome captures the terminal frame of one bridge invocation.
+type snorlaxFrameOutcome struct {
+	exit      *snorlaxExitPayload
+	bridgeErr string
+	readErr   error
+}
+
+// readBridgeFrames reads STDOUT/STDERR/STARTED/EXIT/ERROR frames, writing
+// STDOUT bytes to out (so the caller's JSONL parser consumes them via a pipe)
+// and surfacing STARTED on the started channel. Returns a channel that receives
+// exactly one terminal outcome (on EXIT/ERROR) or a read error when the
+// connection closes. out is closed when the reader stops so the parser
+// unblocks at EOF.
+func readBridgeFrames(conn net.Conn, out io.Writer, started chan<- string) <-chan snorlaxFrameOutcome {
+	outcome := make(chan snorlaxFrameOutcome, 1)
+	go func() {
+		if closer, ok := out.(interface{ Close() error }); ok {
+			defer closer.Close()
+		}
+		for {
+			typ, payload, rerr := snorlaxReadFrame(conn)
+			if rerr != nil {
+				outcome <- snorlaxFrameOutcome{readErr: rerr}
+				return
+			}
+			switch typ {
+			case snorlaxFrameStarted:
+				var s snorlaxStartedPayload
+				_ = json.Unmarshal(payload, &s)
+				select {
+				case started <- s.ContainerName:
+				default:
+				}
+			case snorlaxFrameStdout:
+				if len(payload) > 0 {
+					if _, werr := out.Write(payload); werr != nil {
+						outcome <- snorlaxFrameOutcome{readErr: werr}
+						return
+					}
+				}
+			case snorlaxFrameStderr:
+				// Best-effort: the parser does not consume stderr; the bridge's
+				// audit log retains the full stream on the Snorlax side.
+			case snorlaxFrameExit:
+				var e snorlaxExitPayload
+				_ = json.Unmarshal(payload, &e)
+				outcome <- snorlaxFrameOutcome{exit: &e}
+				return
+			case snorlaxFrameError:
+				var e snorlaxErrorPayload
+				_ = json.Unmarshal(payload, &e)
+				outcome <- snorlaxFrameOutcome{bridgeErr: e.Message}
+				return
+			}
+		}
+	}()
+	return outcome
+}
+
+// runBridgeTurn is the shared codex/pi transport: it dials the bridge, sends
+// REQUEST, streams STDOUT into parse, and resolves the result via finalize on a
+// clean exit. Terminal failures (bridge ERROR, timeout, non-zero exit, dropped
+// connection) take precedence over a parse error. exitDetail enriches a
+// non-zero-exit message (codex's parser error string; "" for pi).
+func (a *snorlaxAgent) runBridgeTurn(
+	ctx context.Context,
+	opts RunOpts,
+	req snorlaxBridgeRequest,
+	parse func(ctx context.Context, r io.Reader) error,
+	finalize func() (*Result, error),
+	exitDetail func() string,
+) (*Result, error) {
 	conn, err := net.Dial("unix", a.bridgeSocket())
 	if err != nil {
 		return nil, fmt.Errorf("snorlax bridge unavailable at %s: %w (is src/host/nmBridge.ts running?)", a.bridgeSocket(), err)
@@ -194,13 +360,6 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		})
 	}()
 
-	req := snorlaxBridgeRequest{
-		Agent:       "codex",
-		Argv:        argv,
-		Cwd:         opts.CWD,
-		ExecutionID: fmt.Sprintf("nm-%d-%d", time.Now().UnixNano(), os.Getpid()),
-		Session:     session,
-	}
 	reqJSON, err := json.Marshal(req)
 	if err != nil {
 		_ = conn.Close()
@@ -212,56 +371,11 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 	}
 
 	// Stream STDOUT frames into the JSONL parser via a pipe so OnChunk fires in
-	// real time, exactly like the local codex adapter. STDERR is buffered and
-	// used only to enrich error messages. STARTED/EXIT/ERROR are control frames.
+	// real time, exactly like the local adapters. STARTED/EXIT/ERROR are control
+	// frames; STDERR is dropped (the bridge's audit log retains it).
 	pr, pw := io.Pipe()
-	type frameOutcome struct {
-		exit      *snorlaxExitPayload
-		bridgeErr string
-		readErr   error
-	}
-	outcome := make(chan frameOutcome, 1)
 	started := make(chan string, 1)
-
-	go func() {
-		defer pw.Close()
-		for {
-			typ, payload, rerr := snorlaxReadFrame(conn)
-			if rerr != nil {
-				outcome <- frameOutcome{readErr: rerr}
-				return
-			}
-			switch typ {
-			case snorlaxFrameStarted:
-				var s snorlaxStartedPayload
-				_ = json.Unmarshal(payload, &s)
-				select {
-				case started <- s.ContainerName:
-				default:
-				}
-			case snorlaxFrameStdout:
-				if len(payload) > 0 {
-					if _, werr := pw.Write(payload); werr != nil {
-						outcome <- frameOutcome{readErr: werr}
-						return
-					}
-				}
-			case snorlaxFrameStderr:
-				// Best-effort: the parser does not consume stderr; the bridge's
-				// audit log retains the full stream on the Snorlax side.
-			case snorlaxFrameExit:
-				var e snorlaxExitPayload
-				_ = json.Unmarshal(payload, &e)
-				outcome <- frameOutcome{exit: &e}
-				return
-			case snorlaxFrameError:
-				var e snorlaxErrorPayload
-				_ = json.Unmarshal(payload, &e)
-				outcome <- frameOutcome{bridgeErr: e.Message}
-				return
-			}
-		}
-	}()
+	outcome := readBridgeFrames(conn, pw, started)
 
 	// Surface the container start as a lifecycle event (no host pid; the bridge
 	// owns the container). Non-blocking: STARTED may already have arrived.
@@ -277,31 +391,24 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 		}
 	}()
 
-	var usage TokenUsage
-	var lastMessage string
-	var codexErr string
-	var threadID string
-	metrics := newCodexMetricsAccumulator()
-	parseErr := parseCodexEvents(ctx, pr, opts.OnChunk, &usage, &lastMessage, &codexErr, &threadID, metrics)
+	parseErr := parse(ctx, pr)
 
-	var res *Result
-	var retErr error
 	select {
 	case o := <-outcome:
 		_ = conn.Close()
 		switch {
 		case o.bridgeErr != "":
-			retErr = fmt.Errorf("snorlax bridge: %s", o.bridgeErr)
+			retErr := fmt.Errorf("snorlax bridge: %s", o.bridgeErr)
 			emitAgentExited(opts, "snorlax", 0, retErr)
 			return nil, retErr
 		case o.exit != nil:
 			if o.exit.TimedOut {
-				retErr = fmt.Errorf("snorlax bridge: container timed out")
+				retErr := fmt.Errorf("snorlax bridge: container timed out")
 				emitAgentExited(opts, "snorlax", 0, retErr)
 				return nil, retErr
 			}
 			if o.exit.Code != 0 {
-				retErr = fmt.Errorf("snorlax bridge: codex exited code=%d%s", o.exit.Code, detailFromErr(codexErr))
+				retErr := fmt.Errorf("snorlax bridge: agent exited code=%d%s", o.exit.Code, detailFromErr(exitDetail()))
 				emitAgentExited(opts, "snorlax", 0, retErr)
 				return nil, retErr
 			}
@@ -312,40 +419,30 @@ func (a *snorlaxAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, erro
 				return nil, ctx.Err()
 			}
 			if errors.Is(o.readErr, io.EOF) || errors.Is(o.readErr, io.ErrUnexpectedEOF) {
-				retErr = fmt.Errorf("snorlax bridge: connection closed unexpectedly")
+				retErr := fmt.Errorf("snorlax bridge: connection closed unexpectedly")
 				emitAgentExited(opts, "snorlax", 0, retErr)
 				return nil, retErr
 			}
 			if o.readErr != nil {
-				retErr = fmt.Errorf("snorlax bridge: read: %w", o.readErr)
+				retErr := fmt.Errorf("snorlax bridge: read: %w", o.readErr)
 				emitAgentExited(opts, "snorlax", 0, retErr)
 				return nil, retErr
 			}
 		}
 	case <-time.After(snorlaxResultWait):
 		_ = conn.Close()
-		retErr = fmt.Errorf("snorlax bridge: no terminal frame after parser returned")
+		retErr := fmt.Errorf("snorlax bridge: no terminal frame after parser returned")
 		emitAgentExited(opts, "snorlax", 0, retErr)
 		return nil, retErr
 	}
 
 	if parseErr != nil {
-		retErr = fmt.Errorf("snorlax bridge: parse events: %w", parseErr)
+		retErr := fmt.Errorf("snorlax bridge: parse events: %w", parseErr)
 		emitAgentExited(opts, "snorlax", 0, retErr)
 		return nil, retErr
 	}
 
-	res, retErr = finalizeTextResult("snorlax", lastMessage, validationSchema, usage)
-	if res != nil {
-		res.SessionID = threadID
-		res.Resumed = resumeID != ""
-		res.SessionUsageCumulative = true
-		m := metrics.metrics()
-		res.Metrics = &m
-		// resolveCodexModel reads a local rollout transcript that does not exist
-		// on the no-mistakes host (codex ran inside the container); leave model
-		// identity unknown rather than fabricate it.
-	}
+	res, retErr := finalize()
 	emitAgentExited(opts, "snorlax", 0, retErr)
 	return res, retErr
 }

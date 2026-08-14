@@ -47,7 +47,7 @@ By default that directory is temporary and local to the machine; repos can opt i
 | OpenCode | `opencode` | Persistent HTTP server, SSE streaming |
 | Pi | `pi` | Subprocess per invocation, JSONL events |
 | Copilot | `copilot` | Subprocess per invocation, JSONL events |
-| Snorlax | `snorlax` | Local bridge socket, Codex JSONL events |
+| Snorlax | `snorlax` | Local bridge socket, Codex or Pi JSONL events |
 | Cursor | `cursor-agent` + `acpx` | `cursor-agent acp` through the ACP bridge |
 | ACP target | `acpx` | Optional user-installed ACP bridge |
 
@@ -268,7 +268,7 @@ That resume command has a narrower flag surface than `codex exec`, so a resume t
 
 ## Snorlax
 
-Forwards Codex invocations to Snorlax's controlled container over the local bridge socket (`SNORLAX_NM_SOCKET`, or Snorlax's default socket path). Snorlax uses the Codex `exec --json` protocol and accepts model/config overrides from `agent_args_override.snorlax`. When structured output is requested, no-mistakes writes the normalized schema under `$NM_HOME/tmp/codex-schemas/` before passing `--output-schema`, so the bridge-mounted container can open it.
+Forwards invocations to Snorlax's controlled container over the local bridge socket (`SNORLAX_NM_SOCKET`, or Snorlax's default socket path). The globally selected backend is Codex by default; Pi is available for OpenAI-compatible providers that Codex cannot reach. See [`snorlax_backend`](/no-mistakes/reference/global-config/#snorlax_backend) for backend behavior and [`agent_args_override`](/no-mistakes/reference/global-config/#agent_args_override) for model and provider configuration.
 
 ## Rovo Dev
 

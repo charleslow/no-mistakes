@@ -2,15 +2,19 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // fakeBridge is an in-process server speaking the snorlax bridge wire protocol
@@ -349,6 +353,121 @@ func TestSnorlaxAdapter_ColdSessionPlaceholderIsNotForwarded(t *testing.T) {
 		Session: &SessionRef{},
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// The pi backend drives the pi-agent-cli bridge agent: it sends Agent:"pi",
+// forwards the prompt via stdinB64 (pi reads its prompt from stdin, not argv),
+// reuses piAgent.buildArgs for the argv, and parses pi's JSONL (agent_end).
+func TestSnorlaxAdapter_PiBackend(t *testing.T) {
+	const prompt = "create probe.txt containing hi"
+	fb := startFakeBridge(t, func(conn net.Conn, req *snorlaxBridgeRequest) {
+		// Echo the stdin prompt back so we can prove it round-tripped.
+		stdin, _ := base64.StdEncoding.DecodeString(req.StdinB64)
+		reply := "got prompt: " + string(stdin)
+		writeStarted(conn, "snorlax-pi-1")
+		writeStdout(conn, `{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":`+strconv.Quote(reply)+`}],"usage":{"input":12,"output":7}}]}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+
+	a := &snorlaxAgent{
+		backend:    snorlaxBackendPi,
+		pi:         &piAgent{extraArgs: []string{"--print", "--model", "inferx/deepseek-v4-flash-0731"}},
+		socketPath: fb.socket,
+	}
+	res, err := a.Run(context.Background(), RunOpts{
+		Prompt: prompt,
+		CWD:    "/home/u/nm/worktree",
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	req := fb.request()
+	if req.Agent != "pi" {
+		t.Errorf("request.Agent = %q, want pi", req.Agent)
+	}
+	// Prompt is carried via stdinB64, not argv.
+	gotStdin, _ := base64.StdEncoding.DecodeString(req.StdinB64)
+	if string(gotStdin) != prompt {
+		t.Errorf("stdinB64 = %q, want prompt %q", string(gotStdin), prompt)
+	}
+	if contains(req.Argv, prompt) {
+		t.Errorf("argv = %v, prompt must NOT be in argv for pi", req.Argv)
+	}
+	// Model + pi managed flags come from extraArgs/buildArgs.
+	if !contains(req.Argv, "--model") || !contains(req.Argv, "inferx/deepseek-v4-flash-0731") {
+		t.Errorf("argv = %v, want --model inferx/deepseek-v4-flash-0731", req.Argv)
+	}
+	if !contains(req.Argv, "--mode") || !contains(req.Argv, "json") || !contains(req.Argv, "--no-session") {
+		t.Errorf("argv = %v, want --mode json --no-session", req.Argv)
+	}
+
+	if res.Text != "got prompt: "+prompt {
+		t.Errorf("Result.Text = %q", res.Text)
+	}
+	if res.Usage.InputTokens != 12 || res.Usage.OutputTokens != 7 {
+		t.Errorf("Result.Usage = %+v", res.Usage)
+	}
+	if !res.UsageReported {
+		t.Error("Result.UsageReported = false, want true")
+	}
+}
+
+func TestSnorlaxAdapter_PiBackendNoResume(t *testing.T) {
+	a := &snorlaxAgent{backend: snorlaxBackendPi, pi: &piAgent{}}
+	if a.SupportsSessionResume() {
+		t.Error("pi backend SupportsSessionResume = true, want false (pi runs --no-session)")
+	}
+}
+
+// NewWithOptions selects the snorlax backend from Options.SnorlaxBackend:
+// "" or "codex" → codex (default), "pi" → pi; anything else is rejected.
+func TestNewWithOptions_SnorlaxBackend(t *testing.T) {
+	codexAgt, err := NewWithOptions(types.AgentSnorlax, "bin", nil, Options{})
+	if err != nil {
+		t.Fatalf("default: %v", err)
+	}
+	sa := codexAgt.(*snorlaxAgent)
+	if sa.backend != snorlaxBackendCodex {
+		t.Errorf("default backend = %q, want codex", sa.backend)
+	}
+	if sa.codex == nil {
+		t.Error("codex backend agent not set")
+	}
+
+	piAgt, err := NewWithOptions(types.AgentSnorlax, "bin", []string{"--print", "--model", "inferx/deepseek-v4-flash-0731"}, Options{SnorlaxBackend: "pi"})
+	if err != nil {
+		t.Fatalf("pi: %v", err)
+	}
+	sa2 := piAgt.(*snorlaxAgent)
+	if sa2.backend != snorlaxBackendPi {
+		t.Errorf("backend = %q, want pi", sa2.backend)
+	}
+	if sa2.pi == nil || !contains(sa2.pi.extraArgs, "inferx/deepseek-v4-flash-0731") {
+		t.Errorf("pi backend agent/extraArgs not wired: %+v", sa2.pi)
+	}
+
+	if _, err := NewWithOptions(types.AgentSnorlax, "bin", nil, Options{SnorlaxBackend: "gemini"}); err == nil ||
+		!strings.Contains(err.Error(), `must be "codex" or "pi"`) {
+		t.Errorf("expected invalid backend error, got %v", err)
+	}
+}
+
+// An assistant error in pi's event stream (stopReason:"error") surfaces as a
+// Go error even though pi exits 0 — matching the native pi adapter.
+func TestSnorlaxAdapter_PiBackendAssistantError(t *testing.T) {
+	fb := startFakeBridge(t, func(conn net.Conn, _ *snorlaxBridgeRequest) {
+		writeStarted(conn, "c")
+		writeStdout(conn, `{"type":"agent_end","messages":[{"role":"assistant","stopReason":"error","errorMessage":"model timed out","content":[]}]}`)
+		writeExit(conn, 0, false)
+	})
+	defer fb.close()
+	a := &snorlaxAgent{backend: snorlaxBackendPi, pi: &piAgent{}, socketPath: fb.socket}
+	_, err := a.Run(context.Background(), RunOpts{Prompt: "x", CWD: "/tmp"})
+	if err == nil || !strings.Contains(err.Error(), "model timed out") {
+		t.Errorf("err = %v, want pi reported error", err)
 	}
 }
 

@@ -43,7 +43,7 @@ Override the local Snorlax bridge socket used by `agent: snorlax`.
 | Type    | `string`                                                                                        |
 | Default | `$XDG_RUNTIME_DIR/snorlax-nm.sock`, falling back to `~/.snorlax/nm-bridge.sock` when home exists |
 
-When set, no-mistakes uses this socket for Snorlax availability checks and for forwarding Codex invocations to the bridge.
+When set, no-mistakes uses this socket for Snorlax availability checks and for forwarding invocations to the bridge. The [`snorlax_backend`](/no-mistakes/reference/global-config/#snorlax_backend) global setting selects the in-container CLI.
 
 ## `NO_MISTAKES_BITBUCKET_EMAIL`
 
