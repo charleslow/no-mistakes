@@ -552,9 +552,14 @@ const defaultConfigYAML = `# no-mistakes global configuration
 # "acp:cursor" also uses that Cursor default command
 # Use acp:<target> to run an optional user-installed acpx target, for example acp:gemini
 # "snorlax" forwards each invocation to Snorlax's controlled container over a
-# local bridge socket (SNORLAX_NM_SOCKET); see plan-no-mistakes.md. Pilot is
-# codex-only; the model surface is configured via agent_args_override.snorlax.
+# local bridge socket (SNORLAX_NM_SOCKET); see plan-no-mistakes.md. Select its
+# in-container CLI with snorlax_backend: codex (default) or pi. The model surface
+# is configured via agent_args_override.snorlax.
 agent: auto
+
+# Snorlax in-container CLI. The pi backend reads prompts from stdin and always
+# runs without session resume. Options: codex, pi
+snorlax_backend: codex
 
 # Optional path to the user-installed acpx binary for acp:<target> agents and ACP aliases
 # acpx_path: acpx
@@ -606,6 +611,10 @@ log_level: info
 #     - service_tier="priority"
 #     - -c
 #     - model_reasoning_effort="low"
+#   snorlax:
+#     - --print
+#     - --model
+#     - <provider>/<model-id> # for snorlax_backend: pi
 #
 # Maximum follow-up auto-fix attempts per step (0 = disabled after the initial pass)
 # Document fixes are attempted during the initial document pass.

@@ -10,6 +10,8 @@ Global configuration lives at `~/.no-mistakes/config.yaml`. Set `NM_HOME` to rel
 
 agent: auto
 
+snorlax_backend: codex
+
 acpx_path: acpx
 
 acp_registry_overrides:
@@ -85,7 +87,7 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
 Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: auto`.
-`snorlax` forwards Codex invocations to Snorlax over its local bridge socket and is not considered by `agent: auto`.
+`snorlax` forwards Codex or pi invocations to Snorlax over its local bridge socket and is not considered by `agent: auto`.
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
@@ -101,6 +103,18 @@ After resolving `auto`, entries that resolve to the same ACP target are deduplic
 If no entry is available, the gate fails before its first pipeline step.
 If a pipeline invocation fails because that agent process cannot start or exits with an error, no-mistakes retries that invocation with the next available fallback.
 Structured findings and schema/output validation problems do not trigger fallback.
+
+### snorlax_backend
+
+Selects the in-container CLI used by `agent: snorlax`.
+
+|         |               |
+| ------- | ------------- |
+| Type    | `string`      |
+| Values  | `codex`, `pi` |
+| Default | `codex`       |
+
+The `codex` backend preserves the standard Codex prompt, structured-output, and session behavior. The `pi` backend sends the prompt through the bridge on standard input and always disables session resume with `--no-session`.
 
 ### acpx_path
 
@@ -175,9 +189,9 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`                                                             |
 | `pi`       | `--mode`, `--no-session`                                                                                    |
 | `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
-| `snorlax`  | Same managed Codex argv as `codex`                                                                          |
+| `snorlax`  | Union of the managed `codex` and `pi` flags                                                                 |
 
-For structured `codex` and `snorlax` runs, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it. Snorlax schemas are written under `$NM_HOME/tmp/codex-schemas/` so the bridge-mounted container can open them.
+For structured `codex` runs and `snorlax_backend: codex`, no-mistakes also appends its own `--output-schema <tempfile>` after your overrides. Treat that flag as managed even though config validation does not currently reject it. Snorlax schemas are written under `$NM_HOME/tmp/codex-schemas/` so the bridge-mounted container can open them. The pi backend instead parses pi's streaming JSON output and does not use Codex schemas.
 The Claude and Codex session-control forms are reserved so no-mistakes can keep review-loop conversations deterministic: review turns stay session-free while the fixer keeps its own isolated durable session.
 
 Smart defaults:
@@ -213,6 +227,10 @@ agent_args_override:
   pi:
     - --provider
     - google
+  snorlax:
+    - --print
+    - --model
+    - <provider>/<model-id> # for snorlax_backend: pi
 ```
 
 For Codex, `service_tier` and `model_reasoning_effort` tune different things: `service_tier` selects the speed or priority lane, while `model_reasoning_effort` selects reasoning depth. no-mistakes reloads global config while setting up each run, so edits made before `no-mistakes axi run` apply to that run. For repeatable profiles, use separately initialized `NM_HOME` directories; each has its own `config.yaml` and no-mistakes state.
