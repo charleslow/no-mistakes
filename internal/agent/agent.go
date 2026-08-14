@@ -253,6 +253,12 @@ type Options struct {
 	// from config.Config; adapters without a verified suppression knob ignore it
 	// and are refused separately by EnsureGateNeutralized when the opt-out is on.
 	DisableProjectSettings bool
+	// SnorlaxBackend selects which in-container CLI the snorlax bridge agent
+	// drives: "codex" (default, upstream codex argv + JSONL) or "pi" (the
+	// pi-agent-cli backend, which reaches any openai-compatible provider in
+	// snorlax's config.yaml — e.g. inferx — through the bridge). Only meaningful
+	// for the snorlax agent; ignored by all others.
+	SnorlaxBackend string
 }
 
 func finalizeTextResult(agentName, text string, schema json.RawMessage, usage TokenUsage) (*Result, error) {
@@ -809,7 +815,20 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentCopilot:
 		return &copilotAgent{bin: bin, extraArgs: extraArgs}, nil
 	case types.AgentSnorlax:
-		return &snorlaxAgent{codex: &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings}}, nil
+		switch strings.ToLower(strings.TrimSpace(opts.SnorlaxBackend)) {
+		case "", "codex":
+			return &snorlaxAgent{
+				backend: snorlaxBackendCodex,
+				codex:   &codexAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings},
+			}, nil
+		case "pi":
+			return &snorlaxAgent{
+				backend: snorlaxBackendPi,
+				pi:      &piAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: opts.DisableProjectSettings},
+			}, nil
+		default:
+			return nil, fmt.Errorf("snorlax_backend must be \"codex\" or \"pi\", got %q", opts.SnorlaxBackend)
+		}
 	default:
 		return nil, fmt.Errorf("unknown agent %q; valid options: auto, claude, codex, rovodev, opencode, pi, copilot, cursor, snorlax, acp:<target> (set 'agent' in ~/.no-mistakes/config.yaml)", name)
 	}

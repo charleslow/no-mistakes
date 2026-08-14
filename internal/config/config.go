@@ -68,10 +68,16 @@ type GlobalConfig struct {
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
-	CITimeout            time.Duration       `yaml:"-"`
-	StepQuietWarning     time.Duration       `yaml:"-"`
-	DaemonConnectTimeout time.Duration       `yaml:"-"`
-	LogLevel             string              `yaml:"log_level"`
+	// SnorlaxBackend selects which in-container CLI the snorlax bridge agent
+	// runs: "codex" (default, upstream codex argv + JSONL) or "pi" (the
+	// pi-agent-cli backend, which can reach any openai-compatible provider in
+	// snorlax's config.yaml — e.g. inferx — that codex can't). Only meaningful
+	// when agent: snorlax. Empty is treated as "codex".
+	SnorlaxBackend       string        `yaml:"snorlax_backend"`
+	CITimeout            time.Duration `yaml:"-"`
+	StepQuietWarning     time.Duration `yaml:"-"`
+	DaemonConnectTimeout time.Duration `yaml:"-"`
+	LogLevel             string        `yaml:"log_level"`
 	// SessionReuse controls per-run agent session reuse in the review loop:
 	// one durable fixer session across review-fix turns. Review turns always
 	// run session-free so the rereview never resumes the session whose
@@ -96,6 +102,7 @@ type globalConfigRaw struct {
 	ACPRegistryOverrides map[string]string   `yaml:"acp_registry_overrides"`
 	AgentPathOverride    map[string]string   `yaml:"agent_path_override"`
 	AgentArgsOverride    map[string][]string `yaml:"agent_args_override"`
+	SnorlaxBackend       string              `yaml:"snorlax_backend"`
 	CITimeout            string              `yaml:"ci_timeout"`
 	DaemonConnectTimeout string              `yaml:"daemon_connect_timeout"`
 	BabysitTimeout       string              `yaml:"babysit_timeout"`
@@ -380,6 +387,7 @@ type Config struct {
 	ACPRegistryOverrides map[string]string
 	AgentPathOverride    map[string]string
 	AgentArgsOverride    map[string][]string
+	SnorlaxBackend       string
 	CITimeout            time.Duration
 	StepQuietWarning     time.Duration
 	LogLevel             string
@@ -1026,10 +1034,19 @@ var agentArgsOverrideAgents = map[string]bool{
 }
 
 func init() {
-	// The snorlax adapter forwards the exact upstream codex argv, so its
-	// reserved-flag surface is identical to codex (alias instead of duplicating
-	// the set so the two cannot drift).
-	reservedAgentArgs[string(types.AgentSnorlax)] = reservedAgentArgs[string(types.AgentCodex)]
+	// The snorlax adapter forwards the exact upstream codex argv OR the pi
+	// argv (config.yaml snorlax_backend), so its reserved-flag surface is the
+	// union of codex and pi: whichever backend runs, its no-mistakes-managed
+	// flags (codex's --json/--color, pi's --mode/--no-session) cannot be
+	// overridden through agent_args_override.snorlax.
+	union := map[string]bool{}
+	for k, v := range reservedAgentArgs[string(types.AgentCodex)] {
+		union[k] = v
+	}
+	for k, v := range reservedAgentArgs[string(types.AgentPi)] {
+		union[k] = v
+	}
+	reservedAgentArgs[string(types.AgentSnorlax)] = union
 }
 
 // reservedAgentArgs lists flags that no-mistakes manages internally and that
@@ -1180,6 +1197,15 @@ func LoadGlobal(path string) (*GlobalConfig, error) {
 			return nil, err
 		}
 		cfg.AgentArgsOverride = raw.AgentArgsOverride
+	}
+	if raw.SnorlaxBackend != "" {
+		sb := strings.ToLower(strings.TrimSpace(raw.SnorlaxBackend))
+		switch sb {
+		case "codex", "pi":
+			cfg.SnorlaxBackend = sb
+		default:
+			return nil, fmt.Errorf("snorlax_backend must be \"codex\" or \"pi\", got %q", raw.SnorlaxBackend)
+		}
 	}
 	timeoutValue := raw.CITimeout
 	if timeoutValue == "" {
@@ -1625,6 +1651,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		ACPRegistryOverrides: global.ACPRegistryOverrides,
 		AgentPathOverride:    global.AgentPathOverride,
 		AgentArgsOverride:    global.AgentArgsOverride,
+		SnorlaxBackend:       global.SnorlaxBackend,
 		CITimeout:            global.CITimeout,
 		StepQuietWarning:     global.StepQuietWarning,
 		LogLevel:             global.LogLevel,
