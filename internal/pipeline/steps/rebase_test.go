@@ -62,8 +62,12 @@ func TestUpdateHeadSHA_ResetFailurePreservesGateAndRunHead(t *testing.T) {
 	t.Run("gate-preserved", func(t *testing.T) {
 		sctx, submitted, observed := newScenario(t)
 		breakReset(t, sctx.WorkDir)
-		if _, err := updateHeadSHA(context.Background(), sctx); err == nil {
+		_, err := updateHeadSHA(context.Background(), sctx)
+		if err == nil {
 			t.Fatal("expected empty-diff reset failure")
+		}
+		if !errors.Is(err, pipeline.ErrSkipTerminalHeadReconciliation) {
+			t.Fatalf("reset failure = %v, want skip-reconciliation classification", err)
 		}
 		got, err := sctx.DB.GetRun(sctx.Run.ID)
 		if err != nil {
