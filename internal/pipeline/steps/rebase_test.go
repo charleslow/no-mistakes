@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,7 +13,93 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
+
+func TestUpdateHeadSHA_ResetFailurePreservesGateAndRunHead(t *testing.T) {
+	newScenario := func(t *testing.T) (*pipeline.StepContext, string, string) {
+		t.Helper()
+		dir := t.TempDir()
+		gitCmd(t, dir, "init")
+		gitCmd(t, dir, "config", "user.name", "test")
+		gitCmd(t, dir, "config", "user.email", "test@test.com")
+		gitCmd(t, dir, "checkout", "-b", "main")
+		if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "base.txt")
+		gitCmd(t, dir, "commit", "-m", "base")
+		baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+		gitCmd(t, dir, "checkout", "-b", "feature")
+		if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitCmd(t, dir, "add", "feature.txt")
+		gitCmd(t, dir, "commit", "-m", "feature")
+		submitted := gitCmd(t, dir, "rev-parse", "HEAD")
+		gitCmd(t, dir, "checkout", "main")
+		gitCmd(t, dir, "merge", "--no-ff", "feature", "-m", "already delivered")
+		observed := gitCmd(t, dir, "rev-parse", "HEAD")
+		sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submitted, config.Commands{})
+		sctx.Run.Branch = "refs/heads/feature"
+		return sctx, submitted, observed
+	}
+
+	breakReset := func(t *testing.T, dir string) {
+		t.Helper()
+		indexPath := gitCmd(t, dir, "rev-parse", "--git-path", "index")
+		if !filepath.IsAbs(indexPath) {
+			indexPath = filepath.Join(dir, indexPath)
+		}
+		if err := os.Remove(indexPath); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(indexPath, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("gate-preserved", func(t *testing.T) {
+		sctx, submitted, observed := newScenario(t)
+		breakReset(t, sctx.WorkDir)
+		if _, err := updateHeadSHA(context.Background(), sctx); err == nil {
+			t.Fatal("expected empty-diff reset failure")
+		}
+		got, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.HeadSHA != observed {
+			t.Fatalf("run head = %s, want preserved observed head %s", got.HeadSHA, observed)
+		}
+		if gateHead := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/heads/feature"); gateHead != observed {
+			t.Fatalf("gate head = %s, want preserved observed head %s", gateHead, observed)
+		}
+		if got.HeadSHA == submitted {
+			t.Fatalf("reset failure did not preserve the moved head")
+		}
+	})
+
+	t.Run("gate-cas-fails", func(t *testing.T) {
+		sctx, submitted, _ := newScenario(t)
+		gitCmd(t, sctx.WorkDir, "update-ref", "-d", "refs/heads/feature")
+		breakReset(t, sctx.WorkDir)
+		err := func() error {
+			_, err := updateHeadSHA(context.Background(), sctx)
+			return err
+		}()
+		if !errors.Is(err, pipeline.ErrSkipTerminalHeadReconciliation) {
+			t.Fatalf("reset failure with failed gate CAS = %v, want skip-reconciliation classification", err)
+		}
+		got, getErr := sctx.DB.GetRun(sctx.Run.ID)
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if got.HeadSHA != submitted {
+			t.Fatalf("run head = %s, want submitted head %s after failed gate CAS", got.HeadSHA, submitted)
+		}
+	})
+}
 
 func TestRebaseStep_ConflictTriesAllTargets(t *testing.T) {
 	t.Parallel()

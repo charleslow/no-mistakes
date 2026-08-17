@@ -48,8 +48,6 @@ var canonicalBranchSyncPhrases = []string{
 	// (v1.44.2 dogfood catch): every surface must name the released state and
 	// that it needs no recovery.
 	"user_owned",
-	"no pipeline-only content remains",
-	"empty-diff/already-delivered outcome",
 }
 
 const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"

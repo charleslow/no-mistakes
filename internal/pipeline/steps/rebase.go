@@ -527,14 +527,18 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		// past the submitted head, so custody recovery can never find the
 		// preserved head (blocked_recover_gate_diverged).
 		if recorded != "" && headSHA != recorded {
-			statusOut, statusErr := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
-			if statusErr != nil {
-				return nil, fmt.Errorf("verify worktree cleanliness before empty-diff restore: %w", statusErr)
-			}
-			if strings.TrimSpace(statusOut) != "" {
-				return nil, fmt.Errorf("worktree is not clean after empty-diff rebase; refusing to restore head %s", shortSHA(recorded))
-			}
 			if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
+				branchRef := runBranchRef(sctx.Run.Branch)
+				if branchRef == "" {
+					return nil, fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; run branch is unavailable for gate preservation", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr)
+				}
+				if _, casErr := git.Run(ctx, sctx.WorkDir, "update-ref", branchRef, headSHA, recorded); casErr != nil {
+					return nil, fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; preserve gate ref %s failed: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr, branchRef, casErr)
+				}
+				sctx.Run.HeadSHA = headSHA
+				if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+					return nil, fmt.Errorf("preserve head %s after empty-diff restore failure: %w", shortSHA(headSHA), err)
+				}
 				return nil, fmt.Errorf("restore head %s after empty-diff skip: %w", shortSHA(recorded), resetErr)
 			}
 			sctx.Log(fmt.Sprintf("restored head to %s: branch content already on %s", shortSHA(recorded), defaultBranch))
@@ -551,6 +555,17 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	}
 
 	return &pipeline.StepOutcome{}, nil
+}
+
+func runBranchRef(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	if strings.HasPrefix(branch, "refs/") {
+		return branch
+	}
+	return "refs/heads/" + branch
 }
 
 func shortSHA(sha string) string {

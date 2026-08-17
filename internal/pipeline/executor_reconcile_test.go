@@ -4,12 +4,69 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExecutorSkipsTerminalHeadReconciliationAfterPreservationFailure(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	workDir := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = workDir
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	runGit("init")
+	runGit("config", "user.name", "test")
+	runGit("config", "user.email", "test@test.com")
+	runGit("checkout", "-b", "main")
+	if err := os.WriteFile(filepath.Join(workDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "base.txt")
+	runGit("commit", "-m", "base")
+	runGit("checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(workDir, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "feature.txt")
+	runGit("commit", "-m", "feature")
+	submitted := runGit("rev-parse", "HEAD")
+	runGit("checkout", "main")
+	runGit("merge", "--no-ff", "feature", "-m", "already delivered")
+	observed := runGit("rev-parse", "HEAD")
+	run.Branch = "refs/heads/feature"
+	run.HeadSHA = submitted
+	if err := database.UpdateRunHeadSHA(run.ID, submitted); err != nil {
+		t.Fatal(err)
+	}
+
+	err := fmt.Errorf("%w: reset failed", ErrSkipTerminalHeadReconciliation)
+	exec := NewExecutor(database, p, nil, nil, []Step{newFailStep(types.StepRebase, err)}, nil)
+	if gotErr := exec.Execute(context.Background(), run, repo, workDir); !errors.Is(gotErr, ErrSkipTerminalHeadReconciliation) {
+		t.Fatalf("Execute() error = %v, want preservation failure", gotErr)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.HeadSHA != submitted {
+		t.Fatalf("terminal run head = %s, want submitted head %s; observed worktree head was %s", got.HeadSHA, submitted, observed)
+	}
+}
 
 type reconcilingApprovalStep struct {
 	name      types.StepName
