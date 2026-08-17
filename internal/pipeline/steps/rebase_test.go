@@ -16,6 +16,25 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
+func TestRunBranchRef(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "short", branch: "feature", want: "refs/heads/feature"},
+		{name: "qualified", branch: "refs/heads/feature", want: "refs/heads/feature"},
+		{name: "refs-prefixed-short", branch: "refs/foo", want: "refs/heads/refs/foo"},
+		{name: "empty", branch: "", want: ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runBranchRef(tt.branch); got != tt.want {
+				t.Fatalf("runBranchRef(%q) = %q, want %q", tt.branch, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestUpdateHeadSHA_ResetFailurePreservesGateAndRunHead(t *testing.T) {
 	newScenario := func(t *testing.T) (*pipeline.StepContext, string, string) {
 		t.Helper()

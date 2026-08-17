@@ -559,7 +559,7 @@ func runBranchRef(branch string) string {
 	if branch == "" {
 		return ""
 	}
-	if strings.HasPrefix(branch, "refs/") {
+	if strings.HasPrefix(branch, "refs/heads/") {
 		return branch
 	}
 	return "refs/heads/" + branch
