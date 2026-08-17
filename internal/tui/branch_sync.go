@@ -59,7 +59,7 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 		case branchsync.StateCustodyReturned:
 			message = "Custody returned; the branch is yours. Start a fresh run when ready."
 		case branchsync.StateUserOwned:
-			message = "Run ended before the pipeline changed anything; the branch and head are yours and immediately usable."
+			message = "No pipeline-only content remains: cancellation or an empty-diff/already-delivered outcome released the branch at the submitted head. The branch and head are yours and immediately usable."
 		default:
 			return ""
 		}

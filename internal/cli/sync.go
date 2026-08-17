@@ -279,7 +279,7 @@ func humanSyncSummary(state branchsync.State) string {
 	case branchsync.StateCustodyReturned:
 		return "custody returned; the branch is yours - start a fresh run when ready"
 	case branchsync.StateUserOwned:
-		return "run ended before the pipeline changed anything; the branch and head are yours and immediately usable"
+		return "no pipeline-only content remains: cancellation or an empty-diff/already-delivered outcome released the branch at the submitted head; the branch and head are yours and immediately usable"
 	case branchsync.StatePushInProgress:
 		return "pipeline branch update is in progress; synchronization is unavailable"
 	case branchsync.StateBehind:
