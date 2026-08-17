@@ -142,9 +142,21 @@ func TestBranchSyncGuidance_SyncedAcrossStaticAndLiveSurfaces(t *testing.T) {
 		}
 	}
 
-	for _, phrase := range []string{"user_owned", "empty-diff/already-delivered outcome", "submitted head"} {
-		if !strings.Contains(newSyncCmd().Long, phrase) {
-			t.Errorf("sync command help is missing user-owned release phrase %q", phrase)
+	for name, cmd := range map[string]*cobra.Command{
+		"sync command help":     newSyncCmd(),
+		"axi sync command help": newAxiSyncCmd(),
+	} {
+		var help bytes.Buffer
+		cmd.SetOut(&help)
+		cmd.SetErr(&help)
+		cmd.SetArgs([]string{"--help"})
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("render %s: %v", name, err)
+		}
+		for _, phrase := range []string{"user_owned", "empty-diff/already-delivered outcome", "submitted head"} {
+			if !strings.Contains(help.String(), phrase) {
+				t.Errorf("%s is missing user-owned release phrase %q:\n%s", name, phrase, help.String())
+			}
 		}
 	}
 }
