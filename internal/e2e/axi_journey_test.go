@@ -624,6 +624,115 @@ func TestAxiCustodyRecoveryAfterRebaseJourney(t *testing.T) {
 	}
 }
 
+// TestAxiEmptyDiffRunReleasesCustodyJourney reproduces the stranded-custody
+// dead end hit when a run's branch content already lives on the default branch
+// (commonly another PR merging the same change first): the rebase step aligns
+// the pipeline worktree with the published default-branch tip, sees an empty
+// diff, and skips every remaining step. That terminal run used to record the
+// rebase-only head move as unpublished pipeline work, but the gate branch never
+// advances past the submitted head - so recover always refused with
+// blocked_recover_gate_diverged and the branch was stranded in pipeline-owned
+// custody forever, even though nothing of the operator's was unpublished. The
+// contract: an empty diff means the branch is already delivered, so the
+// terminal run must release ownership exactly like an unmoved head.
+func TestAxiEmptyDiffRunReleasesCustodyJourney(t *testing.T) {
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: cleanReviewScenario(t)})
+	h.CommitChange("init-empty-diff", "seed.txt", "seed\n", "seed empty diff init")
+	initWorktree := h.AddWorktree("init-empty-diff")
+	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
+		t.Fatalf("init: %v\n%s", err, out)
+	}
+
+	submitted := h.CommitChange("feature/empty-diff", "feature.txt", "guarded\n", "add guarded feature")
+	// The same change lands on the default branch before validation - exactly
+	// the shape of a parallel PR merging while the operator's local branch
+	// still carries its own commit for the identical content.
+	h.CommitChange("main", "feature.txt", "guarded\n", "land the guarded feature")
+	if out, err := h.runGit(context.Background(), h.WorkDir, "push", "origin", "main"); err != nil {
+		t.Fatalf("land feature on origin main: %v\n%s", err, out)
+	}
+
+	operator := h.AddWorktree("feature/empty-diff")
+	runOut, err := h.RunInDir(operator, "axi", "run", "--intent", "validate the feature that already landed upstream")
+	if err != nil {
+		t.Fatalf("empty-diff run: %v\n%s", err, runOut)
+	}
+	for _, want := range []string{"outcome: passed", "rebase: completed", "review: skipped", "push: skipped"} {
+		if !strings.Contains(runOut, want) {
+			t.Errorf("empty-diff run output missing %q:\n%s", want, runOut)
+		}
+	}
+	rebaseLogOut, err := h.RunInDir(operator, "axi", "logs", "--step", "rebase", "--full")
+	if err != nil {
+		t.Fatalf("rebase step log: %v\n%s", err, rebaseLogOut)
+	}
+	for _, want := range []string{"empty diff after rebase", "restored head to", "branch content already on main"} {
+		if !strings.Contains(rebaseLogOut, want) {
+			t.Errorf("rebase step log missing %q:\n%s", want, rebaseLogOut)
+		}
+	}
+
+	// The terminal run released the branch: the only head move was the rebase
+	// aligning with the already-published default branch, so the run must be
+	// reported user-owned at the exact submitted head with no custody claim.
+	statusOut, err := h.RunInDir(operator, "axi", "status")
+	if err != nil {
+		t.Fatalf("axi status: %v\n%s", err, statusOut)
+	}
+	var statusDoc struct {
+		BranchSync struct {
+			Pipeline struct {
+				SubmittedHead string `toon:"submitted_head"`
+				CurrentHead   string `toon:"current_head"`
+			} `toon:"pipeline"`
+		} `toon:"branch_sync"`
+	}
+	if err := toon.UnmarshalString(statusOut, &statusDoc); err != nil {
+		t.Fatalf("decode axi status TOON: %v\n%s", err, statusOut)
+	}
+	if got := statusDoc.BranchSync.Pipeline.SubmittedHead; got != submitted {
+		t.Errorf("submitted head = %q, want %q\n%s", got, submitted, statusOut)
+	}
+	if got := statusDoc.BranchSync.Pipeline.CurrentHead; got != submitted {
+		t.Errorf("current head = %q, want the unmoved submitted %q: the empty-diff rebase must not claim custody of a head move\n%s", got, submitted, statusOut)
+	}
+	for _, want := range []string{"branch_sync:", "state: user_owned", "safety: user_owned", "relation: equal"} {
+		if !strings.Contains(statusOut, want) {
+			t.Errorf("released status missing %q:\n%s", want, statusOut)
+		}
+	}
+	for _, forbidden := range []string{"recover_custody", "pipeline_owned", "blocked_"} {
+		if strings.Contains(statusOut, forbidden) {
+			t.Errorf("released status must not contain %q:\n%s", forbidden, statusOut)
+		}
+	}
+
+	// Recovery is an idempotent no-op: there is no pipeline-preserved head to
+	// return. Before the fix this was the dead end - recover failed with
+	// blocked_recover_gate_diverged because the gate branch never held the
+	// rebase-only head.
+	recoverOut, err := h.RunInDir(operator, "axi", "sync", "--recover")
+	if err != nil {
+		t.Fatalf("empty-diff recovery must be a no-op success, got dead end: %v\n%s", err, recoverOut)
+	}
+	if !strings.Contains(recoverOut, "state: user_owned") {
+		t.Errorf("recover output missing user_owned state:\n%s", recoverOut)
+	}
+
+	// The operator's branch never moved and stays immediately usable: a fresh
+	// run starts without demanding a custody recovery first.
+	if got := strings.TrimSpace(h.WorktreeRefSHA("feature/empty-diff")); got != submitted {
+		t.Fatalf("operator branch moved without explicit recovery: %s", got)
+	}
+	freshOut, err := h.RunInDir(operator, "axi", "run", "--intent", "revalidate the already-landed feature")
+	if err != nil {
+		t.Fatalf("fresh run after empty-diff release: %v\n%s", err, freshOut)
+	}
+	if !strings.Contains(freshOut, "outcome: passed") {
+		t.Fatalf("fresh run did not complete cleanly:\n%s", freshOut)
+	}
+}
+
 // TestAxiPrePushAbortUnmovedHeadCustodyJourney reproduces the ownership gap
 // hit when delivery switches to a direct PR mid-validation: the worker aborts
 // the run at the review gate BEFORE the pipeline changes anything, so the

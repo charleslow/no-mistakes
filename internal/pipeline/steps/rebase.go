@@ -504,7 +504,8 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
-	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
+	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
+	if headSHA != "" && headSHA != recorded {
 		sctx.Run.HeadSHA = headSHA
 		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 			return nil, err
@@ -522,6 +523,30 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
 	if err == nil && strings.TrimSpace(diff) == "" {
 		sctx.Log("empty diff after rebase, skipping remaining steps")
+		// The branch content is already published on the default branch, so no
+		// pipeline-only content exists to preserve. The rebase moved the worktree
+		// head onto the published tip; restore the recorded head so the terminal
+		// run releases the branch (user_owned). Recording the rebase-only head
+		// move instead strands the branch forever: the gate branch never advances
+		// past the submitted head, so custody recovery can never find the
+		// preserved head (blocked_recover_gate_diverged).
+		if recorded != "" && headSHA != recorded {
+			statusOut, statusErr := git.Run(ctx, sctx.WorkDir, "status", "--porcelain")
+			if statusErr == nil && strings.TrimSpace(statusOut) == "" {
+				if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
+					return nil, fmt.Errorf("restore head %s after empty-diff skip: %w", shortSHA(recorded), resetErr)
+				}
+				sctx.Run.HeadSHA = recorded
+				if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, recorded); err != nil {
+					return nil, err
+				}
+				sctx.Log(fmt.Sprintf("restored head to %s: branch content already on %s", shortSHA(recorded), defaultBranch))
+			} else if statusErr != nil {
+				sctx.LogFile(fmt.Sprintf("warning: could not verify worktree cleanliness before restoring head: %v", statusErr))
+			} else {
+				sctx.LogFile("warning: worktree not clean after empty-diff rebase; keeping the moved head recorded")
+			}
+		}
 		return &pipeline.StepOutcome{SkipRemaining: true}, nil
 	}
 
