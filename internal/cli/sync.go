@@ -31,7 +31,8 @@ func newSyncCmd() *cobra.Command {
 			"pipeline commits: it anchors the preserved head, then either fast-forwards a\n" +
 			"clean behind worktree or adopts a diverged preserved head only when proven to\n" +
 			"carry every local change. Unproven divergence refuses. A run cancelled before\n" +
-			"the pipeline changed anything releases the branch by itself (user_owned) and\n" +
+			"the pipeline changed anything releases the branch by itself (user_owned); an\n" +
+			"empty-diff/already-delivered outcome also releases it at the submitted head, and\n" +
 			"makes --recover a no-op. --recover --keep-local keeps the current local head\n" +
 			"instead and never touches the worktree.",
 		Args: cobra.NoArgs,

@@ -44,11 +44,12 @@ var canonicalBranchSyncPhrases = []string{
 	"recover_custody",
 	"no-mistakes axi sync --recover",
 	"preserved in the local gate",
-	// Cancellation releases a run that never changed the submitted head
+	// Cancellation and empty-diff release both leave no pipeline-only content
 	// (v1.44.2 dogfood catch): every surface must name the released state and
 	// that it needs no recovery.
 	"user_owned",
-	"before changing the submitted head",
+	"no pipeline-only content remains",
+	"empty-diff/already-delivered outcome",
 }
 
 const canonicalPipelineAgentPrerequisite = "a supported native agent binary, the `agent: cursor` ACP alias, or an explicit `acp:<target>` through `acpx`"
@@ -138,6 +139,12 @@ func TestBranchSyncGuidance_SyncedAcrossStaticAndLiveSurfaces(t *testing.T) {
 			if !strings.Contains(content, phrase) {
 				t.Errorf("%s is missing branch-sync guidance phrase %q", name, phrase)
 			}
+		}
+	}
+
+	for _, phrase := range []string{"user_owned", "empty-diff/already-delivered outcome", "submitted head"} {
+		if !strings.Contains(newSyncCmd().Long, phrase) {
+			t.Errorf("sync command help is missing user-owned release phrase %q", phrase)
 		}
 	}
 }
