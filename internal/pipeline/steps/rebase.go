@@ -527,16 +527,25 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		// past the submitted head, so custody recovery can never find the
 		// preserved head (blocked_recover_gate_diverged).
 		if recorded != "" && headSHA != recorded {
-			// Pipeline owns this clean worktree after rebase, so reset unconditionally.
-			if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
+			preserveGateHead := func(reason error) error {
 				branchRef := runBranchRef(sctx.Run.Branch)
 				if branchRef == "" {
-					return nil, fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; run branch is unavailable for gate preservation", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr)
+					return fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; run branch is unavailable for gate preservation", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason)
 				}
 				if _, casErr := git.Run(ctx, sctx.WorkDir, "update-ref", branchRef, headSHA, recorded); casErr != nil {
-					return nil, fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; preserve gate ref %s failed: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr, branchRef, casErr)
+					return fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; preserve gate ref %s failed: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason, branchRef, casErr)
 				}
-				return nil, fmt.Errorf("%w: restore head %s after empty-diff skip: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr)
+				return fmt.Errorf("%w: restore head %s after empty-diff skip: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason)
+			}
+			dirty, cleanErr := git.HasUncommittedChanges(ctx, sctx.WorkDir)
+			if cleanErr != nil {
+				return nil, preserveGateHead(fmt.Errorf("cannot verify worktree cleanliness before restoring head %s: %w", shortSHA(recorded), cleanErr))
+			}
+			if dirty {
+				return nil, preserveGateHead(fmt.Errorf("refusing to discard uncommitted worktree changes while restoring head %s", shortSHA(recorded)))
+			}
+			if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
+				return nil, preserveGateHead(resetErr)
 			}
 			sctx.Log(fmt.Sprintf("restored head to %s: branch content already on %s", shortSHA(recorded), defaultBranch))
 		}
