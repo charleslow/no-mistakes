@@ -41,9 +41,10 @@ const (
 	StateLegacyUnbound        = "legacy_unbound"
 	StateCustodyReturned      = "custody_returned"
 	// StateUserOwned reports a branch released by its terminal outcome: the
-	// run ended before the pipeline changed the submitted head, so no
-	// pipeline-created content exists to recover and the exact branch and head
-	// are the operator's, immediately usable with no sync action.
+	// final verified head equals the submitted head, so no pipeline-only content
+	// exists to recover and the exact branch and head are the operator's,
+	// immediately usable with no sync action. This includes an empty-diff or
+	// already-delivered outcome that restores a rebase-only head move.
 	StateUserOwned = "user_owned"
 )
 
@@ -445,8 +446,10 @@ func (s *Service) Apply(ctx context.Context) State {
 // unpublished commits. While such a run was active the pipeline_owned block
 // was correct; once it is terminal nothing will ever publish the head, so an
 // explicit guarded exit must exist. A terminal run whose verified worktree
-// head never changed from the submitted head needs no recovery at all, so
-// Recover treats that user_owned state as an idempotent no-op success.
+// final verified head equals the submitted head needs no recovery at all, so
+// Recover treats that user_owned state as an idempotent no-op success. This
+// includes an empty-diff/already-delivered outcome that restored a rebase-only
+// head move before terminalization.
 //
 // The decision matrix, by worktree relation to the preserved pipeline head P
 // (the gate branch head recorded as the run's head_sha):
@@ -1349,10 +1352,12 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 }
 
 // classifyUserOwned reports a branch released by its terminal outcome: the
-// terminal run ended before the pipeline changed the submitted head, so no
-// pipeline-created content exists to recover. The exact branch and head are
-// the operator's and immediately usable - no sync action is required or
-// offered, and a separately authorized direct push or PR is never blocked.
+// terminal run's final verified head equals the submitted head, so no
+// pipeline-only content exists to recover. The exact branch and head are the
+// operator's and immediately usable - no sync action is required or offered,
+// and a separately authorized direct push or PR is never blocked. An
+// empty-diff/already-delivered outcome may have temporarily moved the rebase
+// worktree head before restoring it to this final state.
 func (s *Service) classifyUserOwned(ctx context.Context, state *State) {
 	state.State = StateUserOwned
 	state.Safety = "user_owned"
