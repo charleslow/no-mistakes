@@ -527,6 +527,7 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 		// past the submitted head, so custody recovery can never find the
 		// preserved head (blocked_recover_gate_diverged).
 		if recorded != "" && headSHA != recorded {
+			// Pipeline owns this clean worktree after rebase, so reset unconditionally.
 			if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
 				branchRef := runBranchRef(sctx.Run.Branch)
 				if branchRef == "" {
