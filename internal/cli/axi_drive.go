@@ -925,7 +925,7 @@ func runAxiAbort(cmd *cobra.Command, runID string) error {
 			}
 		case state.State == branchsync.StateUserOwned:
 			help = []string{
-				"Cancellation released this branch: the exact branch and head are yours and immediately usable - no sync action is needed",
+				"Cancellation or an empty-diff/already-delivered outcome released this branch: the exact branch and head are yours and immediately usable - no sync action is needed",
 			}
 		}
 	}
