@@ -522,6 +522,64 @@ func TestRecoverGateDivergenceAndUnavailabilityFailClosed(t *testing.T) {
 	})
 }
 
+func TestRecoverUnverifiedRebasedGateHeadUsesContainment(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name     string
+		contains bool
+	}{
+		{name: "contains recorded content", contains: true},
+		{name: "drops recorded content", contains: false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var f *recoverFixture
+			if tt.contains {
+				f = newRebasedRecoverFixture(t, types.RunCancelled)
+			} else {
+				f = newRebasedRecoverFixtureWithPipelineWork(t, types.RunCancelled, func(t *testing.T, pipelineDir string) {
+					mustWrite(t, filepath.Join(pipelineDir, "feature.txt"), "feature one\n")
+					mustRun(t, pipelineDir, "commit", "-am", "no-mistakes(review): dropped recorded content")
+				})
+			}
+			if err := f.db.UpdateRunHeadSHA(f.run.ID, f.submitted); err != nil {
+				t.Fatal(err)
+			}
+			if err := f.db.UpdateRunErrorStatus(f.run.ID, "reset failed", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			var err error
+			f.run, err = f.db.GetRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			state := f.service.Recover(f.ctx, false)
+			if tt.contains {
+				if !state.Recovered || !state.Changed || state.State != StateCustodyReturned {
+					t.Fatalf("containment recovery = %#v", state)
+				}
+				if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.preserved {
+					t.Fatalf("HEAD = %s, want preserved %s", got, f.preserved)
+				}
+				if !f.custodyReturned() {
+					t.Fatal("containment recovery did not stamp custody")
+				}
+				return
+			}
+			if state.Recovered || state.Changed || state.Safety != "blocked_recover_unverified_head" {
+				t.Fatalf("dropped-content recovery = %#v", state)
+			}
+			if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+				t.Fatalf("HEAD = %s after refusal, want submitted %s", got, f.submitted)
+			}
+			if f.custodyReturned() {
+				t.Fatal("dropped-content refusal stamped custody")
+			}
+		})
+	}
+}
+
 // TestRecoverTerminalPostPushRunWithMovedHead covers the post-push class cell:
 // a run that pushed successfully, then went terminal with additional
 // unpublished pipeline commits. Recovery fast-forwards to the preserved head

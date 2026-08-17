@@ -69,14 +69,14 @@ func TestUpdateHeadSHA_ResetFailurePreservesGateAndRunHead(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.HeadSHA != observed {
-			t.Fatalf("run head = %s, want preserved observed head %s", got.HeadSHA, observed)
+		if got.HeadSHA != submitted {
+			t.Fatalf("run head = %s, want submitted head %s", got.HeadSHA, submitted)
 		}
 		if gateHead := gitCmd(t, sctx.WorkDir, "rev-parse", "refs/heads/feature"); gateHead != observed {
 			t.Fatalf("gate head = %s, want preserved observed head %s", gateHead, observed)
 		}
-		if got.HeadSHA == submitted {
-			t.Fatalf("reset failure did not preserve the moved head")
+		if sctx.Run.HeadSHA != submitted {
+			t.Fatalf("in-memory run head = %s, want submitted head %s", sctx.Run.HeadSHA, submitted)
 		}
 	})
 

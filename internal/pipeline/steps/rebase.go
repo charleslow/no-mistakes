@@ -535,10 +535,6 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 				if _, casErr := git.Run(ctx, sctx.WorkDir, "update-ref", branchRef, headSHA, recorded); casErr != nil {
 					return nil, fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; preserve gate ref %s failed: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), resetErr, branchRef, casErr)
 				}
-				sctx.Run.HeadSHA = headSHA
-				if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-					return nil, fmt.Errorf("preserve head %s after empty-diff restore failure: %w", shortSHA(headSHA), err)
-				}
 				return nil, fmt.Errorf("restore head %s after empty-diff skip: %w", shortSHA(recorded), resetErr)
 			}
 			sctx.Log(fmt.Sprintf("restored head to %s: branch content already on %s", shortSHA(recorded), defaultBranch))
