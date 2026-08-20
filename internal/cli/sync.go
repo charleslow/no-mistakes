@@ -31,7 +31,8 @@ func newSyncCmd() *cobra.Command {
 			"pipeline commits: it anchors the preserved head, then either fast-forwards a\n" +
 			"clean behind worktree or adopts a diverged preserved head only when proven to\n" +
 			"carry every local change. Unproven divergence refuses. A run cancelled before\n" +
-			"the pipeline changed anything releases the branch by itself (user_owned) and\n" +
+			"the pipeline changed anything releases the branch by itself (user_owned); an\n" +
+			"empty-diff/already-delivered outcome also releases it at the submitted head, and\n" +
 			"makes --recover a no-op. --recover --keep-local keeps the current local head\n" +
 			"instead and never touches the worktree.",
 		Args: cobra.NoArgs,
@@ -53,7 +54,7 @@ func newSyncCmd() *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and show the synchronization plan without changing HEAD")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "apply an eligible guarded synchronization without prompting")
-	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch)")
+	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation or an empty-diff/already-delivered outcome already released the branch)")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; the preserved commits stay anchored and the gate follows the kept head")
 	return cmd
 }
@@ -71,7 +72,10 @@ func newAxiSyncCmd() *cobra.Command {
 			"verified pipeline head with reset semantics.\n" +
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
-			"next_action.code: recover_custody; --keep-local keeps the current local head.",
+			"next_action.code: recover_custody; cancellation or an empty-diff/already-delivered\n" +
+			"outcome that already released the branch as user_owned at the submitted head is\n" +
+			"an idempotent no-op. --keep-local\n" +
+			"keeps the current local head.",
 		Args:          cobra.NoArgs,
 		SilenceErrors: true,
 		SilenceUsage:  true,
@@ -86,7 +90,7 @@ func newAxiSyncCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and return the plan without changing HEAD")
-	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch)")
+	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation or an empty-diff/already-delivered outcome already released the branch)")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; the preserved commits stay anchored and the gate follows the kept head")
 	return cmd
 }
@@ -231,7 +235,7 @@ func runHumanRecover(cmd *cobra.Command, keepLocal, yes bool) error {
 	printHumanSyncState(cmd, recovered)
 	if recovered.Recovered {
 		if recovered.State == branchsync.StateUserOwned {
-			fmt.Fprintln(cmd.OutOrStdout(), "  Nothing to recover; cancellation already released this branch to you.")
+			fmt.Fprintln(cmd.OutOrStdout(), "  Nothing to recover; cancellation or an empty-diff/already-delivered outcome already released this branch to you.")
 		} else {
 			fmt.Fprintln(cmd.OutOrStdout(), "  Custody returned; start a fresh run when ready.")
 		}
@@ -275,7 +279,7 @@ func humanSyncSummary(state branchsync.State) string {
 	case branchsync.StateCustodyReturned:
 		return "custody returned; the branch is yours - start a fresh run when ready"
 	case branchsync.StateUserOwned:
-		return "run ended before the pipeline changed anything; the branch and head are yours and immediately usable"
+		return "no pipeline-only content remains: cancellation or an empty-diff/already-delivered outcome released the branch at the submitted head; the branch and head are yours and immediately usable"
 	case branchsync.StatePushInProgress:
 		return "pipeline branch update is in progress; synchronization is unavailable"
 	case branchsync.StateBehind:

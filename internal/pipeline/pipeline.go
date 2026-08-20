@@ -11,6 +11,7 @@ import (
 )
 
 var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
+var ErrSkipTerminalHeadReconciliation = errors.New("skip terminal head reconciliation")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {

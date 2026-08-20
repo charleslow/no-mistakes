@@ -40,6 +40,15 @@ type approvalResponse struct {
 	addedFindings []types.Finding
 }
 
+type redactedStepError struct {
+	message string
+	cause   error
+}
+
+func (e *redactedStepError) Error() string { return e.message }
+
+func (e *redactedStepError) Unwrap() error { return e.cause }
+
 // Executor runs pipeline steps sequentially and coordinates approval interactions.
 type Executor struct {
 	db     *db.DB
@@ -741,7 +750,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				slog.Warn("failed to mark step as failed in db", "step", stepName, "error", dbErr)
 			}
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
-			return false, fmt.Errorf("step %s failed: %s", stepName, redactedErr)
+			return false, &redactedStepError{message: fmt.Sprintf("step %s failed: %s", stepName, redactedErr), cause: err}
 		}
 
 		if stepName == types.StepReview {
@@ -1209,7 +1218,10 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
 		runStatus = types.RunCancelled
 	}
-	verifiedHead, verified := e.reconcileTerminalRunHead(run)
+	verifiedHead, verified := "", false
+	if !errors.Is(err, ErrSkipTerminalHeadReconciliation) {
+		verifiedHead, verified = e.reconcileTerminalRunHead(run)
+	}
 	var dbErr error
 	if verified {
 		dbErr = e.db.UpdateRunErrorStatusWithVerifiedHead(run.ID, errMsg, runStatus, verifiedHead)

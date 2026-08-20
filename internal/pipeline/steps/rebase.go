@@ -504,13 +504,7 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	if err != nil {
 		return nil, fmt.Errorf("resolve head after rebase: %w", err)
 	}
-	if headSHA != "" && headSHA != sctx.Run.HeadSHA {
-		sctx.Run.HeadSHA = headSHA
-		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
-			return nil, err
-		}
-		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
-	}
+	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 
 	// Check if the branch has any diff against the default branch.
 	// If the diff is empty (e.g. branch was already merged), skip remaining steps.
@@ -520,12 +514,64 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	}
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, defaultBranch)
 	diff, err := git.Diff(ctx, sctx.WorkDir, baseSHA, "HEAD")
-	if err == nil && strings.TrimSpace(diff) == "" {
+	if err != nil {
+		return nil, fmt.Errorf("check diff after rebase: %w", err)
+	}
+	if strings.TrimSpace(diff) == "" {
 		sctx.Log("empty diff after rebase, skipping remaining steps")
+		// The branch content is already published on the default branch, so no
+		// pipeline-only content exists to preserve. The rebase moved the worktree
+		// head onto the published tip; restore the recorded head so the terminal
+		// run releases the branch (user_owned). Recording the rebase-only head
+		// move instead strands the branch forever: the gate branch never advances
+		// past the submitted head, so custody recovery can never find the
+		// preserved head (blocked_recover_gate_diverged).
+		if recorded != "" && headSHA != recorded {
+			preserveGateHead := func(reason error) error {
+				branchRef := runBranchRef(sctx.Run.Branch)
+				if branchRef == "" {
+					return fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; run branch is unavailable for gate preservation", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason)
+				}
+				if _, casErr := git.Run(ctx, sctx.WorkDir, "update-ref", branchRef, headSHA, recorded); casErr != nil {
+					return fmt.Errorf("%w: restore head %s after empty-diff skip failed: %v; preserve gate ref %s failed: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason, branchRef, casErr)
+				}
+				return fmt.Errorf("%w: restore head %s after empty-diff skip: %v", pipeline.ErrSkipTerminalHeadReconciliation, shortSHA(recorded), reason)
+			}
+			dirty, cleanErr := git.HasUncommittedChanges(ctx, sctx.WorkDir)
+			if cleanErr != nil {
+				return nil, preserveGateHead(fmt.Errorf("cannot verify worktree cleanliness before restoring head %s: %w", shortSHA(recorded), cleanErr))
+			}
+			if dirty {
+				return nil, preserveGateHead(fmt.Errorf("refusing to discard uncommitted worktree changes while restoring head %s", shortSHA(recorded)))
+			}
+			if _, resetErr := git.Run(ctx, sctx.WorkDir, "reset", "--hard", recorded); resetErr != nil {
+				return nil, preserveGateHead(resetErr)
+			}
+			sctx.Log(fmt.Sprintf("restored head to %s: branch content already on %s", shortSHA(recorded), defaultBranch))
+		}
 		return &pipeline.StepOutcome{SkipRemaining: true}, nil
 	}
 
+	if headSHA != "" && headSHA != recorded {
+		sctx.Run.HeadSHA = headSHA
+		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
+			return nil, err
+		}
+		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
+	}
+
 	return &pipeline.StepOutcome{}, nil
+}
+
+func runBranchRef(branch string) string {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return ""
+	}
+	if strings.HasPrefix(branch, "refs/heads/") {
+		return branch
+	}
+	return "refs/heads/" + branch
 }
 
 func shortSHA(sha string) string {
